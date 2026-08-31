@@ -1,0 +1,39 @@
+# ---- 内核模块构建产物 ----
+*.o
+*.o.cmd
+*.ko
+*.ko.cmd
+*.mod
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+*.dwo
+*.bcs
+*.ll
+.tmp_versions/
+modules.order
+Module.symvers
+
+# ---- 构建输出目录 ----
+build/
+out/
+.cache/
+
+# ---- 打包产物（模块里的 .ko 是构建产物，由 build/ 同步而来）----
+ksumodule/vcut_lower.ko
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+desktop.ini
+Thumbs.db

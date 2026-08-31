@@ -1,0 +1,83 @@
+#!/system/bin/sh
+# vcut_lower 配置  —— 位于 /data/adb/vcut_lower/config.sh
+# 改完重启生效；或直接写 /sys/module/vcut_lower/parameters/* 立即生效（重启后回到本文件的值）
+
+# ============ 关机电压三值（mV）============
+# 原厂: 3030 / 3030 / 2930
+# 模块内部硬下限 VCUT_FLOOR=2500，写更低的值会被钳住（已实测）
+#
+# ⚠️代价要清楚：反复深放到 2.6V 附近会加速电池老化、有析锂风险；低温不要深放。
+#   ★注意「2620」是【带载电压】不是开路电压 —— 内核电压闸比较的是不做 IR 补偿的
+#     均值电压，重负载(5A×28mΩ≈140mV)下会在开路电压还有 ~2760mV 时就到闸。
+#     想真正榨到开路 2.62V 必须息屏轻载放电。
+#   ★VCUT_FW 会被驱动自己传播进电量计 DF 的 Term Voltage
+#     （[0x8d8] → platform_fg_ops_set_cutoff_voltage → DF 块 0x4F），
+#     所以改它同时也改了电量计的计量口径，FCC 会在下一次学习周期重新标定。
+#     这条路径是可逆的：写回 3030 会被同样地传播回去。
+VCUT_FW=2620
+VCUT_DELAY=2620      # ← 电压闸：均值电压 ≤ 此值即关机
+VCUT_SW=2520         # ← UI 判空阈值
+
+# 摘掉 check_shutdown_delay 里硬编码的 3000mV vpack 闸（三门串联，正常不触发，摘掉是兜底）
+KILL_VPACK_GATE=1
+
+# ============ 电量显示（方案C：全程按同一 mAh 刻度均匀下降）============
+SOC_CTL=1            # 1=内核接管电量显示；0=交还系统原生
+
+# FCC：★不再需要手填。0 = 模块每次命中直接从 strategy 结构体 [0x868] 实时读
+#   （= fg_master/charger_full，2026-08-05 实测坐实偏移）。
+#   FCC 是活值，项目期间实测漂过 6445→6208→6837→6801，写死静态值已被证伪。
+#   只有调试时才填 >0 强制覆盖。当前实时值可看：
+#     cat /sys/module/vcut_lower/parameters/t_fcc
+FCC_MAH=0
+
+# QBOT：底部补偿容量(mAh)。★默认 0，原因：
+#   VCUT_FW 已被传播进电量计 Term Voltage，raw_soc 天然覆盖到底部，
+#   底部容量已经在电量计自己的账本里（FCC 因此一次学习就跳了 +629mAh）。
+#   此时再补 QBOT = 把底部算两遍。
+#   qbot=0 时公式退化成 display = raw_soc/100，FCC 在分子分母里完全约掉。
+#   只有把 VCUT_FW 改回 3030（电量计也跟着回去）时，才需要设回实测值 156。
+QBOT_MAH=0
+
+# 内阻(mΩ)：★仅在 QBOT_MAH>0 时参与运算（底部段 IR 补偿）。
+#   QBOT=0 时这个值完全不参与计算，留着只为将来回退 3030 时用。
+RINT_MOHM=28
+
+# ============ 伪装循环次数 ============
+# 两个参数打的是【不同的层】，别搞混：
+#
+# FAKE_CYCLE     → 模块写 strategy 结构体 [0x84c]。影响 update_cc_para 的 dod_para 选档，
+#                  以及 battery/cycle_count 的显示。
+#                  ★对满充电压【无效】（实测：[0x84c]=1 且 batt_psy=1 时 term_volt 仍 4445）。
+#
+# FAKE_FG_CYCLE  → service.sh 写 fg_master/cyclecount（bq27z561 自带的 fake 接口，纯 RAM）。
+#                  ★★只有这一条能抬满充电压。三次可重复实测：
+#                     fg_master=370 → 4445 ； =1 → 4465 ； 回 370 → 4445 ； 再 1 → 4465
+#                  实测连续 20 分钟、跨充放电切换都不会被驱动刷回，开机写一次即可。
+#                  （模块里曾试过 kretprobe 挂 strategy_class_fg_ops_get_cyclecount，
+#                    实测够不着 FV 计算路径，已固定禁用。）
+#
+# 老化降压机制（设备树实证）：
+#   smart_charge/enable_fv_dec_by_cc = 1     mca_strategy_buckchg_class/drop_fv_cycle = 300
+# A/B 实测阶梯（同温同档，只改循环数）：
+#   cyc 1/100 → 4465mV | 299/300 → 4455 | 301/400/600 → 4445 | 1000 → 4425
+# 本机真实循环 370 → 4445，伪装成 1 可恢复 +20mV（约 +100mAh）。
+#
+# ⚠️代价：这等于摘掉厂商给老电芯的保护性降压。风险性质和"降关机电压"不同 ——
+#   降下端是电量低时多榨一点；抬上端是满电时长期偏高压，这才是会鼓包的方向。
+#   不想要就设 -1。
+#
+# ⚠️投票是【粘的】：改完要等一次插拔或温度档跃迁 jeita 才重新投票。
+#   service.sh 在加载后会自动断充 5s 触发一次；手动改参数后可以自己拔插一次充电器。
+#
+# 查证当前生效值：
+#   mount -t debugfs none /d 2>/dev/null; grep effective /d/business-votable/term_volt/status
+#   cat /sys/module/vcut_lower/parameters/t_fg_cycle    # 拦截到的真实循环数
+FAKE_CYCLE=1
+FAKE_FG_CYCLE=1      # -1 = 不伪装满充电压
+
+# ============ 交接防抖 ============
+# 交接 = mean_volt 接近截止时写回 fake_soc=-1，把关机通道交还内核。
+# ⚠️实测教训：原来「一次成立立刻交接」被 5A 负载尖峰误触发。
+# kprobe 命中率自适应：放电中 ~4.8Hz，充电+闲置 ~0.25Hz。交接只发生在放电底部（高频），故 5≈1 秒。
+HANDOFF_HITS=5

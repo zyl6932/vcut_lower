@@ -1,0 +1,103 @@
+{
+  "_readme": [
+    "vcut_lower 的偏移档案库（对应参考项目的 static profile 思路）。",
+    "",
+    "★索引键为什么用 vendor_ko_md5 而不是系统版本号：",
+    "  2026-08-29 实测踩到过 —— OS4.0.0.20 -> OS4.0.0.25，内核版本串【一字未变】",
+    "  （6.12.69-android16-6-gb1493ec68d4a-abogki515789973-4k），只有 vendor 模块换了 build，",
+    "  struct 偏移整体 +0x10。这种情况下按版本号匹配会误判为『无需适配』，",
+    "  而 CRC 也照过 —— 唯一可靠的指纹就是 vendor 模块二进制本身的哈希。",
+    "",
+    "★profile 的用途有二：",
+    "  1. 命中（md5 相同）-> 偏移已知，跳过解析，直接走 编译/patch/安装",
+    "  2. 未命中 -> 作为『已知基线』，配合静态解析算位移量 delta",
+    "",
+    "★每条 offsets 都必须经过三重验证才可入库（见 resolver + verify_device）：",
+    "  静态反汇编语义锚点 / 真机只读 dump 对账 sysfs / 全模块引用交叉印证"
+  ],
+  "schema": 1,
+  "device": "popsicle",
+  "vendor_module": "mca_strategy_fg_comp",
+  "probe_symbol": "mca_battery_shutdown_check_shutdown_delay",
+  "field_names": [
+    "current", "mean_volt", "rm_uah", "fcc_uah", "raw_soc", "cycle", "temp",
+    "soc", "design_uah", "vcut_fw", "vcut_delay", "vcut_sw", "vbatt_empty",
+    "vpack_low_en", "fake_soc", "vpack"
+  ],
+  "profiles": [
+    {
+      "id": "OS4.0.0.20",
+      "build_fingerprint": "OS4.0.0.20",
+      "kernel": "6.12.69-android16-6-gb1493ec68d4a-abogki515789973-4k",
+      "vendor_ko_md5": null,
+      "vendor_ko_size": 189600,
+      "verified": "2026-08-14",
+      "method": "static+dump",
+      "note": "OS3.0 -> OS4.0 迁移时坐实。相对于 OS3.0 整体 +0x1A8，且 vpack 闸是【例外】：简单位移得 0xa90，实际是 0xa91。",
+      "offsets": {
+        "current": "0x9e0",
+        "mean_volt": "0x9ec",
+        "rm_uah": "0xa0c",
+        "fcc_uah": "0xa10",
+        "raw_soc": "0xa14",
+        "cycle": "0x9f4",
+        "temp": "0x9f8",
+        "soc": "0xa28",
+        "design_uah": "0xa34",
+        "vcut_fw": "0xa80",
+        "vcut_delay": "0xa84",
+        "vcut_sw": "0xa88",
+        "vbatt_empty": "0xa8c",
+        "vpack_low_en": "0xa91",
+        "fake_soc": "0xaf4",
+        "vpack": "0xb80"
+      },
+      "fingerprints": [
+        {"off": "0x07c", "val": "0x396a4668", "desc": "ldrb w8,[x19,#0xa91]"},
+        {"off": "0x108", "val": "0xb94a8668", "desc": "ldr  w8,[x19,#0xa84]"},
+        {"off": "0x10c", "val": "0xb949ee69", "desc": "ldr  w9,[x19,#0x9ec]"}
+      ],
+      "crc": {
+        "module_layout": "0x797f2b3e",
+        "param_ops_int": "0xd0f4936b"
+      }
+    },
+    {
+      "id": "OS4.0.0.25.XPBCNXM",
+      "build_fingerprint": "OS4.0.0.25.XPBCNXM",
+      "kernel": "6.12.69-android16-6-gb1493ec68d4a-abogki515789973-4k",
+      "vendor_ko_md5": "c63e102e8adb8361c185784270851e0e",
+      "vendor_ko_size": 189600,
+      "verified": "2026-08-29",
+      "method": "static+dump+refs",
+      "note": "OS4.0.0.20 -> OS4.0.0.25。内核串未变，vendor 模块换 build，struct 整体再 +0x10，本次 16 项【全部】遵守位移无例外。gate 是 0xaa1（不是位移得的 0xaa0 —— 后者是 8 处引用的高频标志）。",
+      "offsets": {
+        "current": "0x9f0",
+        "mean_volt": "0x9fc",
+        "rm_uah": "0xa1c",
+        "fcc_uah": "0xa20",
+        "raw_soc": "0xa24",
+        "cycle": "0xa04",
+        "temp": "0xa08",
+        "soc": "0xa38",
+        "design_uah": "0xa44",
+        "vcut_fw": "0xa90",
+        "vcut_delay": "0xa94",
+        "vcut_sw": "0xa98",
+        "vbatt_empty": "0xa9c",
+        "vpack_low_en": "0xaa1",
+        "fake_soc": "0xb04",
+        "vpack": "0xb90"
+      },
+      "fingerprints": [
+        {"off": "0x07c", "val": "0x396a8668", "desc": "ldrb w8,[x19,#0xaa1]"},
+        {"off": "0x108", "val": "0xb94a9668", "desc": "ldr  w8,[x19,#0xa94]"},
+        {"off": "0x10c", "val": "0xb949fe69", "desc": "ldr  w9,[x19,#0x9fc]"}
+      ],
+      "crc": {
+        "module_layout": "0x797f2b3e",
+        "param_ops_int": "0xd0f4936b"
+      }
+    }
+  ]
+}
