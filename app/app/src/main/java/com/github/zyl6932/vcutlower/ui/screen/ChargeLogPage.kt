@@ -104,7 +104,8 @@ fun ChargeLogPage(
                     else -> sessions.forEach { s ->
                         ArrowPreference(
                             title = if (s.live) "充电中 · ${clock(s.start)} 开始" else dateTime(s.start),
-                            summary = "${duration(s.end - s.start)} · ${s.soc0}% → ${s.soc1}% · 峰值 %.0f W".format(s.peakW),
+                            // 只格式化数值本身：整句 format 时「97% →」里的 % 会被当成格式符（打开即崩）
+                            summary = "${duration(s.end - s.start)} · ${s.soc0}% → ${s.soc1}% · 峰值 ${"%.0f".format(s.peakW)} W",
                             onClick = { onOpen(s) },
                         )
                     }
@@ -200,7 +201,7 @@ fun ChargeLogDetail(
                             Spacer(Modifier.width(10.dp))
                             Summary(
                                 (if (tab == 0) "%.1f A".format(amps(s)) else "%.1f W".format(watts(s))) +
-                                    " · 电量 ${s.soc} % · %.1f ℃".format(s.btemp / 10f),
+                                    " · 电量 ${s.soc} % · ${"%.1f".format(s.btemp / 10f)} ℃",
                                 Modifier.padding(bottom = 5.dp),
                             )
                         }
