@@ -20,6 +20,8 @@
 #include <linux/ptrace.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <asm/sysreg.h>
+#include <asm/barrier.h>
 
 #define TARGET_SYM "mca_battery_shutdown_check_shutdown_delay"
 
@@ -259,6 +261,7 @@ module_param(armed, int, 0444);
  *   last_temp_index 静态量做门控，只在温度带跃迁时才重算），
  *   所以我们写下的 vcutoff 三值是【粘住的】——rmmod 后不会自己回到原值。
  *   必须由模块自己在 exit 里写回，否则会留下一个无人守护的低关机电压。
+ *   （小米 15 dada 是例外：每轮都重算，见 krp_vc。原厂每次重算出的值会更新这里的快照）
  */
 static void *saved_struct;
 static u8    saved_vpack_en;
@@ -592,10 +595,122 @@ static int clamp_param(int v)
 	return v;
 }
 
+/* 我们要写的 vcutoff 三值：参数钳到安全区间，并保持 fw >= delay >= sw */
+static void vcut_target(int *fw, int *dl, int *sw)
+{
+	*fw = clamp_param(vcut_fw);
+	*dl = clamp_param(vcut_delay);
+	*sw = clamp_param(vcut_sw);
+	if (*dl > *fw) *dl = *fw;
+	if (*sw > *dl) *sw = *dl;
+}
+
+/* 把 vcutoff 三值写成 vcut_target()，返回写入的 delay */
+static int write_vcut(void *s)
+{
+	int fw, dl, sw;
+
+	vcut_target(&fw, &dl, &sw);
+	t_wrote = 1;
+	wr32(s, OFF_VCUT_FW,    fw);
+	wr32(s, OFF_VCUT_DELAY, dl);
+	wr32(s, OFF_VCUT_SW,    sw);
+	return dl;
+}
+
+/*
+ * ============ 解锁容量实测（2026-10-21）============
+ * App 原来按一条写死的深放曲线估算（17 Pro Max 一次 ~1A 深放），不考虑负载/温度/老化。
+ * 这里记两样真实数据，由 service.sh 的记录进程每分钟落盘（unlock.log），App 据此估算：
+ *   ① 跨越点：放电中均值电压首次 ≤ 原厂电压闸（= 原厂此刻就会关机）时电量计的 rm。
+ *      电量计截止电压已跟到我们的值（17 系列原生如此，15 系列靠 krp_vc），rm 就是「放到新截止还剩多少」，
+ *      也就正好是比原厂多出来的容量 —— 由电量计按自己的阻抗模型算，自带负载、温度、老化修正。
+ *   ② 跨越之后的放电量：按电流对时间积分（只算放电），一路放到关机就是实际多放出的容量。
+ * 插上充电（≥100mA 流入）即结束本轮，下次放电重新记。只读结构体，不写任何东西。
+ */
+static int t_cross_seq;         /* 本次开机跨越次数（每跨越一次 +1） */
+static int t_cross_rm;          /* 跨越时 rm，mAh */
+static int t_cross_mv;          /* 跨越时均值电压 */
+static int t_cross_ma;          /* 跨越时电流，mA，正 = 放电 */
+static int t_cross_temp;        /* 跨越时温度，0.1℃ */
+static int t_cross_stock;       /* 跨越时的原厂电压闸 */
+static int t_cross_delay;       /* 跨越时我们的电压闸 */
+static int t_below_mah;         /* 跨越后累计放电量，mAh */
+static int t_below_min_mv;      /* 跨越后最低均值电压 */
+module_param(t_cross_seq, int, 0444);
+module_param(t_cross_rm, int, 0444);
+module_param(t_cross_mv, int, 0444);
+module_param(t_cross_ma, int, 0444);
+module_param(t_cross_temp, int, 0444);
+module_param(t_cross_stock, int, 0444);
+module_param(t_cross_delay, int, 0444);
+module_param(t_below_mah, int, 0444);
+module_param(t_below_min_mv, int, 0444);
+
+static int cross_done;          /* 本轮放电已跨越 */
+static s64 below_uas;           /* µA·s */
+static u64 below_last_ms;
+
+/*
+ * 毫秒时钟：直接读 ARM64 系统计数器（内联指令，不引入任何导入符号）。
+ * 6.6 的 GKI 白名单没有 ktime_get_coarse_with_offset，新导入还得核对 CRC，干脆不用内核计时函数。
+ */
+static u64 now_ms(void)
+{
+	u64 f = read_sysreg(cntfrq_el0);
+
+	isb();
+	return f ? read_sysreg(cntvct_el0) * 1000 / f : 0;
+}
+
+static void unlock_track(void *s)
+{
+	u64 now = now_ms();
+	int fw, dl, sw;
+
+	if (!saved_valid || saved_delay <= 0 || t_mean_volt <= 0)
+		return;
+	if (t_current < -100000) {      /* 在充电：本轮结束 */
+		cross_done = 0;
+		below_last_ms = 0;
+		return;
+	}
+	if (!cross_done) {
+		if (t_current <= 0 || t_mean_volt > saved_delay)
+			return;
+		vcut_target(&fw, &dl, &sw);
+		cross_done     = 1;
+		below_uas      = 0;
+		below_last_ms  = 0;
+		t_cross_rm     = rd32(s, OFF_RM_UAH) / 1000;
+		t_cross_mv     = t_mean_volt;
+		t_cross_ma     = t_current / 1000;
+		t_cross_temp   = t_temp;
+		t_cross_stock  = saved_delay;
+		t_cross_delay  = dl;
+		t_below_mah    = 0;
+		t_below_min_mv = t_mean_volt;
+		t_cross_seq++;
+		pr_info("vcut_lower: 跨越原厂电压闸 %dmV：rm=%dmAh mean=%dmV I=%dmA T=%d（我们的闸 %dmV）\n",
+			saved_delay, t_cross_rm, t_mean_volt, t_cross_ma, t_temp, dl);
+	}
+	/* 两次命中间隔超过 2 分钟（深睡）不积分：睡眠电流很小，宁可少算 */
+	if (below_last_ms && t_current > 0) {
+		u64 dt_ms = now - below_last_ms;
+
+		if (dt_ms < 120000)
+			below_uas += (s64)t_current * (s64)dt_ms / 1000;
+	}
+	below_last_ms = now;
+	t_below_mah = (int)(below_uas / 3600000);      /* µA·s → mAh */
+	if (t_mean_volt < t_below_min_mv)
+		t_below_min_mv = t_mean_volt;
+}
+
 static int vcut_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	void *s = (void *)regs->regs[0];
-	int fw, dl, sw;
+	int dl;
 
 	if (!s)
 		return 0;
@@ -682,17 +797,8 @@ static int vcut_pre(struct kprobe *p, struct pt_regs *regs)
 	if (!enable)
 		return 0;
 
-	/* 参数钳到安全区间，并保持 fw >= delay >= sw */
-	fw = clamp_param(vcut_fw);
-	dl = clamp_param(vcut_delay);
-	sw = clamp_param(vcut_sw);
-	if (dl > fw) dl = fw;
-	if (sw > dl) sw = dl;
-
-	t_wrote = 1;
-	wr32(s, OFF_VCUT_FW,    fw);
-	wr32(s, OFF_VCUT_DELAY, dl);
-	wr32(s, OFF_VCUT_SW,    sw);
+	dl = write_vcut(s);
+	unlock_track(s);
 
 	if (kill_vpack_gate && t_gate_ok)
 		*(volatile u8 *)((char *)s + OFF_VPACK_LOW_EN) = 0;
@@ -816,6 +922,74 @@ static int vcut_pre(struct kprobe *p, struct pt_regs *regs)
 static struct kprobe kp = {
 	.symbol_name = TARGET_SYM,
 	.pre_handler = vcut_pre,
+};
+
+/*
+ * ============ 原厂重算 vcutoff 之后立刻写回（2026-10-21）============
+ * fg_update_status 每轮的顺序（小米 15 dada 反汇编坐实）：
+ *   update_vcutoff_para（写 fw/delay/sw）→ set_cutoff_voltage（电量计截止 = fw）
+ *   → fg_ui_soc_smooth → check_shutdown_delay（vcut_pre 在这里写我们的值）
+ * update 里两个标志字节（dada 0xbfd/0xbff，17 系列 0xbd6/0xbd7）决定是否重算：
+ *   17 系列第二个是 0，只在温度带跃迁时才重算，所以 vcut_pre 写下的值基本留得住；
+ *   dada 两个都是 1，每轮都写回原厂 3050 → 关机闸仍是我们的（vcut_pre 在判断前写），
+ *   但电量计截止电压被 set_cutoff_voltage 一直设成 3050，剩余容量按 3050 算。
+ * 修法：在 update 返回时（set_cutoff_voltage 之前）再写一遍我们的值。
+ *   原厂刚算出的值同时作为新的「原值」快照（随温度变化），rmmod 时写回它。
+ *   原厂值不在合理区间 → 说明偏移不对，什么都不写。
+ */
+#define VC_SYM "mca_battery_shutdown_update_vcutoff_para"
+
+static int vc_armed;            /* 只读：kretprobe 是否挂上 */
+static int t_vc_hits;           /* 只读遥测：update 返回后写回的次数 */
+module_param(vc_armed, int, 0444);
+module_param(t_vc_hits, int, 0444);
+
+struct vc_ctx {
+	void *s;
+};
+
+static int vc_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	((struct vc_ctx *)ri->data)->s = (void *)regs->regs[0];
+	return 0;
+}
+
+static int vc_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	void *s = ((struct vc_ctx *)ri->data)->s;
+	int fw, dl, sw, ofw, odl, osw;
+
+	/* 只认首次命中时校验通过的那个结构体 */
+	if (!armed || !saved_valid || !s || s != saved_struct)
+		return 0;
+
+	fw = rd32(s, OFF_VCUT_FW);
+	dl = rd32(s, OFF_VCUT_DELAY);
+	sw = rd32(s, OFF_VCUT_SW);
+	if (fw < 2400 || fw > 3600 || dl < 2400 || dl > 3600 || sw < 2300 || sw > 3600 ||
+	    fw < dl || dl < sw)
+		return 0;
+	/* 和我们要写的不同才是原厂刚重算的值（没重算时这里读到的是我们上次写的） */
+	vcut_target(&ofw, &odl, &osw);
+	if (fw != ofw || dl != odl || sw != osw) {
+		saved_fw    = fw;
+		saved_delay = dl;
+		saved_sw    = sw;
+	}
+
+	if (!enable)
+		return 0;
+	write_vcut(s);
+	t_vc_hits++;
+	return 0;
+}
+
+static struct kretprobe krp_vc = {
+	.kp.symbol_name  = VC_SYM,
+	.entry_handler   = vc_entry,
+	.handler         = vc_ret,
+	.data_size       = sizeof(struct vc_ctx),
+	.maxactive       = 8,
 };
 
 /*
@@ -1346,6 +1520,17 @@ static int __init vcut_init(void)
 			CYC_SYM, fake_fg_cycle);
 	}
 
+	/* 同理：挂不上只是退回「电量计截止电压可能被原厂改回」，关机闸照样由 vcut_pre 管 */
+	ret = register_kretprobe(&krp_vc);
+	if (ret < 0) {
+		vc_armed = 0;
+		pr_warn("vcut_lower: register_kretprobe(%s) 失败 %d —— 原厂重算 vcutoff 后不再补写"
+			"（关机闸仍生效，电量计截止电压可能停在原厂值）\n", VC_SYM, ret);
+	} else {
+		vc_armed = 1;
+		pr_info("vcut_lower: 已挂载 %s（kretprobe，原厂重算后补写 vcutoff）\n", VC_SYM);
+	}
+
 	pr_info("vcut_lower: 已挂载 %s，目标 fw/delay/sw = %d/%d/%d，enable=%d kill_vpack_gate=%d\n",
 		TARGET_SYM, vcut_fw, vcut_delay, vcut_sw, enable, kill_vpack_gate);
 	return 0;
@@ -1354,6 +1539,12 @@ static int __init vcut_init(void)
 static void __exit vcut_exit(void)
 {
 	unregister_kprobe(&kp);
+	/* 先摘补写探针，再写回原值：否则写回后原厂下一轮重算一返回又被我们改掉 */
+	if (vc_armed) {
+		unregister_kretprobe(&krp_vc);
+		vc_armed = 0;
+		pr_info("vcut_lower: 已摘除 %s（补写 %d 次）\n", VC_SYM, t_vc_hits);
+	}
 
 	/*
 	 * ★循环数不需要"写回"：我们从没改过任何存储，只是在返回路径上覆盖返回值。

@@ -167,6 +167,34 @@ fi
 [ "$armed" = "1" ] && log "armed=1 校验通过（命中 ${hits} 次，t_resolved=$(cat $MP/t_resolved) sig_ok=$(cat $MP/sig_ok) anchors=$(cat $MP/t_anchors) t_ovr=$(cat $MP/t_ovr) t_cyc_ok=$(cat $MP/t_cyc_ok)）"
 run_collect
 
+# ---------- 解锁容量记录（2026-10-21）----------
+# 模块在放电跨越原厂电压闸时记下电量计 rm，之后积分放电量（vcut_lower.c unlock_track），
+# 但模块参数重新加载/重启就没了：这里每分钟把本轮写进 unlock.cur（覆盖），
+# 新一轮开始或下次加载时归档进 unlock.log（留 30 条）。App 读这两个文件估算「解锁容量」。
+UL=$DATA/unlock.log
+UC=$DATA/unlock.cur
+UPID=/dev/vcut_unlock.pid
+ul_archive() {
+  [ -s "$UC" ] && { cat "$UC" >> "$UL"; tail -30 "$UL" > "$UL.tmp" && mv "$UL.tmp" "$UL"; }
+  rm -f "$UC"
+}
+unlock_logger() {
+  seq0=0; t0=0
+  while sleep 60; do
+    seq=$(cat $MP/t_cross_seq 2>/dev/null)
+    [ "${seq:-0}" -gt 0 ] 2>/dev/null || continue
+    if [ "$seq" != "$seq0" ]; then ul_archive; seq0=$seq; t0=$(date +%s); fi
+    # shellcheck disable=SC2046  # 每个文件一个数，按空白拆开
+    set -- $(cat $MP/t_cross_rm $MP/t_cross_mv $MP/t_cross_ma $MP/t_cross_temp $MP/t_cross_stock \
+                 $MP/t_cross_delay $MP/t_below_mah $MP/t_below_min_mv 2>/dev/null)
+    [ $# -eq 8 ] && echo "t=$t0 rm=$1 mv=$2 ma=$3 temp=$4 stock=$5 delay=$6 below=$7 minmv=$8" > "$UC"
+  done
+}
+[ -f "$UPID" ] && kill "$(cat "$UPID")" 2>/dev/null
+ul_archive   # 上一次加载的最后一轮（放到关机的话就停在关机前一分钟）
+unlock_logger </dev/null >/dev/null 2>&1 &
+echo $! > "$UPID"
+
 # ---------- 稳定后清零失败计数 ----------
 # 加载与校验已完成，先放锁：等稳定的这 2 分钟里允许再次「重新加载」
 rmdir "$LOCK" 2>/dev/null

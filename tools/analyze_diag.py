@@ -142,6 +142,50 @@ def cell_vendor(root):
     return ''
 
 
+def probe_report(root, notes):
+    """collect.sh 的充电实验（charge_probe.txt）：每个投票项强制成低值 20 秒，电流掉了 = 在充电通路上"""
+    fp = os.path.join(root, 'charge_probe.txt')
+    if not os.path.exists(fp):
+        return
+    S, meta = {}, []
+    for line in open(fp, encoding='utf-8', errors='replace'):
+        f = line.split()
+        if f and f[0] == 'S' and len(f) >= 5:
+            try:
+                S.setdefault((f[1], f[2]), []).append((int(f[3]), abs(int(f[4])) // 1000,
+                                                      int(f[5]) // 1000 if len(f) > 5 else 0))
+            except ValueError:
+                pass
+        elif f and f[0] in ('ABORT', 'END') or line.startswith(('wired_thermal_remove', 'cp_path', 'real_type')):
+            meta.append(line.strip())
+    print('   充电实验（各投票项强制成低值 20 秒）：' + ' | '.join(meta)[:200])
+
+    def avg(rows, t0=0):
+        v = [ma for t, ma, mv in rows if t >= t0]
+        return sum(v) // len(v) if v else 0
+
+    base = avg(S.get(('base', '-'), []))
+    if not base:
+        print('     没有基线数据')
+        return
+    print(f'     基线 {base} mA')
+    hits = []
+    for (ph, n), rows in S.items():
+        if ph != 'low':
+            continue
+        low = avg(rows, 10)               # 前 10 秒留给策略反应
+        back = avg(S.get(('back', n), []), 8)
+        drop = (base - low) * 100 // base
+        mark = '✓ 在通路上' if drop >= 30 else '  无影响' if drop < 10 else '  ？略降'
+        print(f'     {n:16s} 压低后 {low:5d} mA（{-drop:+3d}%）  撤回后 {back:5d} mA  {mark}')
+        if drop >= 30:
+            hits.append(n)
+    if hits:
+        notes.append('充电实验：' + ' / '.join(hits) + ' 压低后电流明显下降 → 守护进程「提升电流」可改用它')
+    else:
+        notes.append('充电实验：没有一个投票项能压低电流 → 本机电流不由这些投票决定，提升电流无从下手（亮屏快充已是上限）')
+
+
 def charge_report(root):
     """[5] 充电增强。返回结论列表（只描述充电增强，不影响降关机电压的判定）"""
     print('\n[5] 充电增强（charge.txt）')
@@ -181,8 +225,22 @@ def charge_report(root):
 
     qc = dt_props(secs.get('dt/mca_strategy_quick_charge', []))
     bk = dt_props(secs.get('dt/mca_strategy_buckchg_class', []))
+    def pick_ffc(d, cv):
+        """batt_para 三元组按 cell_vendor 选总表，总表 9 个（dada 11 个）一行取覆盖 25℃ 那行的 FFC 表
+        （倒数第 3 列）；行宽按「下一行温度下限 = 本行上限」认。→ (总表名, FFC 表名或 None)"""
+        idx = [d.get('batt_para', [])[i:i + 3] for i in range(0, len(d.get('batt_para', [])) - 2, 3)]
+        total = next((t[2] for t in idx if t[1] == cv), idx[0][2] if idx else None)
+        w = d.get(total, []) if total else []
+        wd = 11 if len(w) > 11 and w[9:10] != w[1:2] and w[11] == w[1] else 9
+        for i in range(0, len(w) - wd + 1, wd):
+            row = w[i:i + wd]
+            if re.match(r'-?\d+$', row[0]) and re.match(r'-?\d+$', row[1]) and \
+                    int(row[0]) <= 25 < int(row[1]) and row[wd - 3] != 'null':
+                return total, (row[wd - 3] if row[wd - 3] in d else None)
+        return total, None
+
     if qc:
-        tabs = sorted(k for k in qc if re.match(r'(ffc|normal)_para_\d+_\d+(_[a-z]+)?$', k))
+        tabs = sorted(k for k in qc if re.match(r'(ffc|normal)(_volt)?_para_?([a-z]+_)?\d+_\d+(_[a-z]+)?$', k))
         print('   原厂阶梯表：' + (' '.join(tabs) or '（无）'))
         for k in ('real_curr_max', 'max_vbat'):
             if qc.get(k):
@@ -190,20 +248,10 @@ def charge_report(root):
         if bk.get('ffc_temp_low') and bk.get('ffc_temp_high'):
             print(f"   FFC 温度区间 {bk['ffc_temp_low'][0]}~{bk['ffc_temp_high'][0]} ℃")
         # 照原厂驱动的索引找表（与 customize.sh 的 pick_ffc、App 的 stockBase 同一规则）：
-        # batt_para 三元组按 cell_vendor 选总表，总表 9 个一行取覆盖 25℃ 那行的 FFC 表；查不到再按名字找
+        # 查不到再按名字找
         cv = cell_vendor(root)
-        idx = [qc.get('batt_para', [])[i:i + 3] for i in range(0, len(qc.get('batt_para', [])) - 2, 3)]
-        total = next((t[2] for t in idx if t[1] == cv), idx[0][2] if idx else None)
-        picked = None
-        if total:
-            w = qc.get(total, [])
-            for i in range(0, len(w) - 8, 9):
-                row = w[i:i + 9]
-                if re.match(r'-?\d+$', row[0]) and re.match(r'-?\d+$', row[1]) and \
-                        int(row[0]) <= 25 < int(row[1]) and row[6] != 'null':
-                    picked = row[6]
-                    break
-        name = next((n for n in (picked, 'ffc_para_25_35', f'ffc_para_25_35_{cv}') if n and n in qc), None)
+        total, picked = pick_ffc(qc, cv)
+        name = picked or next((n for n in ('ffc_para_25_35', f'ffc_para_25_35_{cv}') if n in qc), None)
         base = qc.get(name) if name else None
         if name:
             print(f'   电芯厂商 cell_vendor={cv}，总表 {total or "（无）"} → 用 {name}')
@@ -214,7 +262,7 @@ def charge_report(root):
             n, m = ladder_of(tab)
             print(f"   → 安装时默认阶梯：拐点 {','.join(map(str, n))} mV，电流 {','.join(map(str, m))} mA")
         else:
-            notes.append('设备树没有 ffc_para_25_35 → 充电阶梯按单档 FORCE_MA 运行（customize 不会自动设阶梯）')
+            notes.append('设备树里找不到原厂 FFC 表 → 充电阶梯按单档 FORCE_MA 运行（customize 不会自动设阶梯）')
     else:
         notes.append('设备树没有 mca_strategy_quick_charge → 原厂阶梯未知，阶梯页没有灰色参考线')
 
@@ -240,6 +288,8 @@ def charge_report(root):
             n = sum(1 for line in open(fp, encoding='utf-8', errors='replace')
                     if line.strip() and not line.startswith('E '))
             print(f'   {what}（{fn}）：{n} 点')
+
+    probe_report(root, notes)
 
     if not tr_ok and not fc_ok:
         notes.append('两个控制节点都没有 → 充电增强在本机不可用（守护进程会判为「不支持」）')

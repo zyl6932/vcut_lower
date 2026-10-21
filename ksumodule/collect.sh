@@ -124,6 +124,8 @@ dtnode() {
       echo "--- $n"
       head -c 4096 "$d/status" 2>/dev/null
       echo
+      # 有没有 force_val/force_active（能不能像 curr_max 那样强制）
+      echo "[节点] $(ls "$d" 2>/dev/null | tr '\n' ' ')"
     done
   else
     echo "(不存在 $VT)"
@@ -147,6 +149,11 @@ dtnode() {
   ls /sys/class/power_supply/
   sec "usb"; dumpdir /sys/class/power_supply/usb
   sec "xm_power/charger"; ls /sys/class/xm_power/charger/ 2>/dev/null
+  # 电荷泵 / 快充 / 热控档位：投票项里看不出谁在限流时（小米 15 充电 6.9A），靠这几组判断
+  for s in chargerpump quick_charge charger_thermal charger_common charge_interface power smart_charge; do
+    [ -d "/sys/class/xm_power/charger/$s" ] || continue
+    sec "xm_power/charger/$s"; dumpdir "/sys/class/xm_power/charger/$s"
+  done
 
   sec "充电增强守护进程"
   echo "alive=$(pgrep -f vcut_turbo.sh | head -1)"
@@ -154,9 +161,91 @@ dtnode() {
   sec "turbo.log（最后 200 行）"
   tail -200 "$DATA/turbo.log" 2>/dev/null
 } > "$C" 2>&1
+# ---------- 充电实验（2026-10-21）：没有 curr_max 的机型（小米 15 系），找出真正控制充电电流的投票项 ----------
+# 做法：插着快充时，把每个候选投票项依次【强制成低值】20 秒，看电池电流跟不跟着掉。
+#   哪个一压电流就掉，哪个就在充电通路上 → 守护进程的「提升电流」改用它。
+#   只往低压：充电只会变慢，绝不会超出原厂允许的范围。实验前记下每个节点原来的 force 状态，
+#   结束（含中途被打断）原样恢复。电芯 >45℃ 或充电电路 >75℃ 立即中止。
+#   有 curr_max 的机型（17 系列）不做：守护进程 B 已经在用它，避免抢节点。
+#   产物 charge_probe.txt，tools/analyze_diag.py [5] 解析。
+P="$OUT/charge_probe.txt"
+PB=/sys/class/power_supply/battery
+PQ=/sys/class/xm_power/charger/quick_charge
+PCP=/sys/class/xm_power/charger/chargerpump
+PROBE_LOW=1500
+PROBE_SET="multi_chg_cur single_chg_cur div4_multi div4_single div2_multi div2_single div1_multi div1_single buck_charge_curr"
+probe_zone() {
+  for _d in /sys/class/thermal/thermal_zone*/; do
+    read -r _t < "$_d/type" 2>/dev/null || continue
+    [ "$_t" = "$1" ] && { echo "${_d}temp"; return; }
+  done
+}
+probe_restore() {
+  [ -n "$PROBE_SAVED" ] || return 0
+  for _e in $PROBE_SAVED; do        # 名字:force_active:force_val
+    _n=${_e%%:*}; _r=${_e#*:}; _a=${_r%%:*}; _v=${_r#*:}
+    echo "$_v" > "$VT/$_n/force_val" 2>/dev/null
+    echo "$_a" > "$VT/$_n/force_active" 2>/dev/null
+  done
+  PROBE_SAVED=
+}
+# 一行采样：阶段 名字 秒 ibat(µA) vbat(µV) 电芯温度(0.1℃) 充电电路(m℃) ibus_total 充电阶段 vfc_iout
+probe_sample() {
+  echo "S $1 $2 $(cat $PB/current_now 2>/dev/null) $(cat $PB/voltage_now 2>/dev/null) $(cat $PB/temp 2>/dev/null)" \
+       "$(cat "$PCT" 2>/dev/null) $(cat $PCP/ibus_total 2>/dev/null) $(cat $PQ/charging_stage 2>/dev/null) $(cat $PQ/vfc_iout 2>/dev/null)"
+}
+# 采 N 秒（每 2 秒一行）；过热返回 1
+probe_phase() {
+  _t=0
+  while [ $_t -lt "$3" ]; do
+    probe_sample "$1" "$2" "$_t"
+    _bt=$(cat $PB/temp 2>/dev/null); _ct=$(cat "$PCT" 2>/dev/null)
+    [ "${_bt:-0}" -gt 450 ] 2>/dev/null && { echo "ABORT 电芯 ${_bt}"; return 1; }
+    [ "${_ct:-0}" -gt 75000 ] 2>/dev/null && { echo "ABORT 充电电路 ${_ct}"; return 1; }
+    sleep 2; _t=$((_t + 2))
+  done
+  return 0
+}
+probe_run() {
+  echo "===== 充电实验（强制成 ${PROBE_LOW} 各 20 秒） ====="
+  echo "wired_thermal_remove=$(cat /sys/class/xm_power/charger/charger_thermal/wired_thermal_remove 2>/dev/null)"
+  echo "cp_path_enable=$(cat $PQ/cp_path_enable 2>/dev/null)"
+  echo "real_type=$(cat /sys/class/xm_power/charger/charger_common/real_type 2>/dev/null) soc=$(cat $PB/capacity 2>/dev/null)"
+  echo "# S 阶段 投票项 秒 ibat(µA) vbat(µV) btemp(0.1℃) ctherm(m℃) ibus_total charging_stage vfc_iout"
+  PROBE_SAVED=
+  for n in $PROBE_SET; do
+    [ -w "$VT/$n/force_val" ] && [ -w "$VT/$n/force_active" ] || continue
+    PROBE_SAVED="$PROBE_SAVED $n:$(cat "$VT/$n/force_active" 2>/dev/null):$(cat "$VT/$n/force_val" 2>/dev/null)"
+  done
+  echo "原 force 状态:$PROBE_SAVED"
+  probe_phase base - 20 || return 0
+  for n in $PROBE_SET; do
+    [ -w "$VT/$n/force_val" ] && [ -w "$VT/$n/force_active" ] || { echo "SKIP $n（没有 force 节点）"; continue; }
+    echo "V $n $(grep effective "$VT/$n/status" 2>/dev/null)"
+    echo "$PROBE_LOW" > "$VT/$n/force_val"; echo 1 > "$VT/$n/force_active"
+    probe_phase low "$n" 20; ok=$?
+    echo 0 > "$VT/$n/force_active"
+    [ $ok = 0 ] || return 0
+    probe_phase back "$n" 16 || return 0
+  done
+  echo "END"
+}
+if [ -d "$VT" ] && [ ! -d "$VT/curr_max" ] && [ "$(cat /sys/class/power_supply/usb/online 2>/dev/null)" = "1" ] && \
+   [ "$(cat $PB/status 2>/dev/null)" = "Charging" ]; then
+  PCT=$(probe_zone charger_therm); [ -n "$PCT" ] || PCT=$(probe_zone charger_therm0)
+  echo "检测到正在充电：追加约 6 分钟充电实验（会短暂降低充电速度），请保持充电器连接..."
+  trap 'probe_restore' EXIT INT TERM HUP
+  probe_run > "$P" 2>&1
+  probe_restore
+  trap - EXIT INT TERM HUP
+  echo "充电实验完成，已全部撤回。"
+fi
+
 # 本次充电记录与历史充电采样（阶梯图按电量画横轴用），原样带上
 cp /dev/vcut_turbo.log "$OUT/turbo_session.log" 2>/dev/null
 cp "$DATA/charge_hist.log" "$OUT/charge_hist.log" 2>/dev/null
+# 解锁容量实测记录（跨越原厂电压闸时的 rm、之后的放电量）
+cp "$DATA/unlock.log" "$DATA/unlock.cur" "$OUT/" 2>/dev/null
 
 # ---------- 结构体宽范围只读 dump ----------
 {

@@ -28,7 +28,6 @@ object Vcut {
     const val TURBO_RELOAD = "/dev/vcut_turbo.reload"
     /** 设备树里的原厂充电阶梯表 */
     const val QC = "/proc/device-tree/soc/mca_strategy_quick_charge"
-
     /** 与 vcut_turbo.sh 的固定护栏一致 */
     const val VBAT_CEIL = 4495
     const val MA_CEIL = 18000
@@ -56,6 +55,7 @@ object Vcut {
         val version: String = "",
         val kernel: String = "",
         val lastLog: List<String> = emptyList(),
+        val unlock: List<Unlock.Rec> = emptyList(),  // unlock.log + unlock.cur：跨越原厂电压闸的实测记录
     ) {
         fun pi(k: String) = p[k]?.trim()?.toIntOrNull()
         fun bi(k: String) = bat[k]?.trim()?.toIntOrNull()
@@ -99,6 +99,7 @@ object Vcut {
         [ -f $TURBO_STATE ] && sed 's/^/tc=/' $TURBO_STATE
         pgrep -f vcut_turbo.sh >/dev/null && echo "tc_alive=1"
         tail -4 $DATA/boot.log 2>/dev/null | sed 's/^/log=/'
+        cat $DATA/unlock.log $DATA/unlock.cur 2>/dev/null | sed 's/^/ul=/'
     """.trimIndent()
 
     /**
@@ -118,6 +119,7 @@ object Vcut {
         val fg = HashMap<String, String>()
         val cfg = HashMap<String, String>()
         val log = ArrayList<String>()
+        val unlock = ArrayList<Unlock.Rec>()
         var s = Status(root = true)
         for (line in r.out.lines()) {
             // sysfs 一次 grep -H 读完（「路径:值」）。原来每个文件 fork 一次 cat，58 个模块参数要 1.2 秒，
@@ -147,9 +149,10 @@ object Vcut {
                 k == "mode" -> s = s.copy(modeFile = v)
                 k == "version" -> s = s.copy(version = v)
                 k == "log" -> log += v
+                k == "ul" -> Unlock.parse(v)?.let { unlock += it }
             }
         }
-        return s.copy(p = p, bat = bat, fg = fg, cfg = cfg, lastLog = log)
+        return s.copy(p = p, bat = bat, fg = fg, cfg = cfg, lastLog = log, unlock = unlock)
     }
 
     // ---------------- 设置：实际状态 ----------------
@@ -285,13 +288,14 @@ object Vcut {
      * 照原厂驱动的索引找表（与 customize.sh 的 pick_ffc 同一规则）。各机型表名不一样：
      * ffc_para_25_35（17 系列）/ ffc_para_25_35_atl（17 Ultra）/ ffc_para_atl_23_35（K90 Pro Max）……
      *   batt_para = 三元组「编号 电芯厂商 总表名」，按 fg_master/cell_vendor 选总表（没有匹配取第一家）；
-     *   总表每 9 个一行「温度下限 温度上限 - - 最大电流 普通表 FFC表 - stage表」，取覆盖 25℃ 那行的 FFC 表。
+     *   总表每 9 个一行「温度下限 温度上限 - - 最大电流 普通表 FFC表 - stage表」，取覆盖 25℃ 那行的 FFC 表；
+     *   小米 15（dada）一行 11 个，FFC 表同样在倒数第 3 列（行宽按「下一行温度下限 = 本行上限」认）。
      * 查不到再退回按名字找。
      */
     suspend fun stockBase(): Stock? {
         val r = RootShell.run(
             "echo \"CV=${'$'}(cat $FGM/cell_vendor 2>/dev/null)\"; " +
-                "for f in $QC/batt_para* $QC/ffc_para_*; do [ -f \"${'$'}f\" ] && " +
+                "for f in $QC/batt_para* $QC/temp_para* $QC/ffc_para_* $QC/ffc_volt_para*; do [ -f \"${'$'}f\" ] && " +
                 "echo \"${'$'}{f##*/}=${'$'}(tr '\\0' ' ' < ${'$'}f)\"; done"
         ) ?: return null
         val props = r.out.lines().associate { it.substringBefore('=') to it.substringAfter('=', "").trim() }
@@ -301,9 +305,11 @@ object Vcut {
         val idx = words("batt_para").chunked(3).filter { it.size == 3 }
         val total = (idx.firstOrNull { it[1] == cv } ?: idx.firstOrNull())?.get(2)
         val picked = total?.let { t ->
-            words(t).chunked(9).firstOrNull { row ->
-                row.size == 9 && (row[0].toIntOrNull() ?: 99) <= 25 && (row[1].toIntOrNull() ?: 0) > 25 && row[6] != "null"
-            }?.get(6)
+            val w = words(t)
+            val wd = if (w.getOrNull(9) != w.getOrNull(1) && w.getOrNull(11) == w.getOrNull(1)) 11 else 9
+            w.chunked(wd).firstOrNull { row ->
+                row.size == wd && (row[0].toIntOrNull() ?: 99) <= 25 && (row[1].toIntOrNull() ?: 0) > 25 && row[wd - 3] != "null"
+            }?.get(wd - 3)
         }
         val name = listOfNotNull(picked, "ffc_para_25_35", "ffc_para_25_35_$cv").firstOrNull { it in props }
             ?: return null

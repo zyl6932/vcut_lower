@@ -9,7 +9,9 @@ ui_print "-   降低软件关机电压 / 电量全程均匀下降"
 #     popsicle（小米 17 Pro Max）、pandora（小米 17 Pro，2026-10-21 OS4.0.0.38 验证）、
 #     pudding（小米 17，2026-10-21 OS4.0.4.0：mca_strategy_fg_comp.ko 与 popsicle 同版本逐字节相同）、
 #     nezha（小米 17 Ultra，2026-10-21 OS4.0.4.0 诊断全过、正常模式 armed=1 跑通；原厂关机电压 2850）、
-#     myron（REDMI K90 Pro Max，2026-10-21 OS4.0.4.0 诊断全过、观测模式 armed=1，与 17 系列同一套驱动；原厂 3030）；
+#     myron（REDMI K90 Pro Max，2026-10-21 OS4.0.4.0 诊断全过、观测模式 armed=1，与 17 系列同一套驱动；原厂 3030）、
+#     dada（小米 15，2026-10-21 OS4.0.0.22 诊断全过、正常模式 armed=1 跑通；6.6 内核；原厂 3050）、
+#     haotian（小米 15 Pro，2026-10-21 OS4.0.0.19 诊断全过、真机跑通；厂商 .ko 与 dada 逐字节相同；原厂 3250）；
 #   其他机型只要有小米 MCA 电量驱动（目标符号在 kallsyms 里），就以【观测模式】安装：
 #   模块只读不写（enable=0），开机自动采集诊断包，发回分析后再决定能否开启。
 DEV=$(getprop ro.product.device)
@@ -49,6 +51,12 @@ case "$DEV" in
   myron)
     MODE=full
     ui_print "- 机型: REDMI K90 Pro Max（已验证）→ 正常模式" ;;
+  dada)
+    MODE=full
+    ui_print "- 机型: 小米 15（已验证）→ 正常模式" ;;
+  haotian)
+    MODE=full
+    ui_print "- 机型: 小米 15 Pro（已验证）→ 正常模式" ;;
   *)
     MODE=probe
     ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -118,7 +126,8 @@ rm -f /dev/vcut_def.sh
 if [ ! -f "$DATA/.ladder_init" ] || ! grep -q '^LADDER_V=[0-9]' "$CFG"; then
   # 表名各机型不一样（ffc_para_25_35 / ffc_para_25_35_atl / ffc_para_atl_23_35……），照原厂驱动查索引：
   #   batt_para = 三元组「编号 电芯厂商 总表名」，按 fg_master/cell_vendor 选总表（没有匹配取第一家）；
-  #   总表每 9 个一行「温度下限 温度上限 - - 最大电流 普通表 FFC表 - stage表」，取覆盖 25℃ 那行的 FFC 表。
+  #   总表每 9 个一行「温度下限 温度上限 - - 最大电流 普通表 FFC表 - stage表」，取覆盖 25℃ 那行的 FFC 表；
+  #   小米 15（dada）一行 11 个（最大电流后多两列 fv），FFC 表同样在倒数第 3 列。
   #   查不到再退回按名字找。
   QD=/proc/device-tree/soc/mca_strategy_quick_charge
   CV=$(cat /sys/devices/virtual/xm_power/fg_master/cell_vendor 2>/dev/null)
@@ -133,9 +142,13 @@ if [ ! -f "$DATA/.ladder_init" ] || ! grep -q '^LADDER_V=[0-9]' "$CFG"; then
     [ -n "$_bt" ] || _bt=$_first
     [ -n "$_bt" ] && [ -f "$QD/$_bt" ] || return 1
     set -- $(tr '\0' ' ' < "$QD/$_bt")
-    while [ $# -ge 9 ]; do
-      if [ "$1" -le 25 ] 2>/dev/null && [ "$2" -gt 25 ] 2>/dev/null && [ "$7" != null ]; then echo "$7"; return 0; fi
-      shift 9
+    # 行宽按「下一行温度下限 = 本行温度上限」认：9（17 系列）或 11（dada）；FFC 表是第 w-2 个
+    _w=9
+    [ "${10}" = "$2" ] || { [ "${12}" = "$2" ] && _w=11; }
+    while [ $# -ge $_w ]; do
+      eval "_f=\${$((_w - 2))}"
+      if [ "$1" -le 25 ] 2>/dev/null && [ "$2" -gt 25 ] 2>/dev/null && [ "$_f" != null ]; then echo "$_f"; return 0; fi
+      shift $_w
     done
     return 1
   }

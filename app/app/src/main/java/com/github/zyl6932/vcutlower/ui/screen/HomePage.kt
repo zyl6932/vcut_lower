@@ -223,8 +223,8 @@ fun HomePage(
 }
 
 /**
- * 解锁容量：按实测放电曲线估算（见 [Unlock]）。原厂电压闸取模块首次命中时保存的原值
- * （t_orig_delay），当前值取模块正在生效的电压闸。
+ * 解锁容量（见 [Unlock]）：有跨越原厂电压闸的实测记录用实测，没有按放电曲线估算。
+ * 原厂电压闸取模块保存的原值（t_orig_delay），当前值取模块正在生效的电压闸。
  */
 private fun unlockText(s: Vcut.Status): String {
     val a = Vcut.actualOf(s)
@@ -234,7 +234,10 @@ private fun unlockText(s: Vcut.Status): String {
         !a.full -> "观测模式下未解锁"
         orig == null -> "等待模块首次校验…"
         else -> {
-            val e = Unlock.estimate(orig, a.delay, a.fakeFg, s.fi("charger_full")?.div(1000))
+            val e = Unlock.estimate(
+                orig, a.delay, a.fakeFg, s.fi("charger_full")?.div(1000),
+                s.unlock + listOfNotNull(Unlock.live(s)),
+            )
             "估算约增加 ${e.totalMah} mAh"
         }
     }
