@@ -19,6 +19,7 @@
 #include <linux/kprobes.h>
 #include <linux/ptrace.h>
 #include <linux/types.h>
+#include <linux/version.h>
 
 #define TARGET_SYM "mca_battery_shutdown_check_shutdown_delay"
 
@@ -83,6 +84,7 @@
  *     vpack_low_en / fake_soc），其余靠位移量 delta 从基线推导。
  * ============================================================================
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 static int OFF_CURRENT      = 0x9f0;  /* s32 uA，★正=放电         （0.0.25 同；旧 0x9e0）*/
 static int OFF_MEAN_VOLT    = 0x9fc;  /* s32 mV，近5样本均值；电压闸与判空都比它（0.0.25 同）*/
 static int OFF_RAW_SOC      = 0xa28;  /* s32 厘百分比 = rm/FCC×10000 （0.0.25 0xa24 → +4）*/
@@ -118,6 +120,48 @@ static const int BASE_VBATT_EMPTY  = 0xaa4;
 static const int BASE_VPACK_LOW_EN = 0xaa9;
 static const int BASE_FAKE_SOC     = 0xb0c;
 static const int BASE_VPACK        = 0xb98;
+#else
+/*
+ * ★小米 15（dada，SM8750，6.6.118-android15-8，OS4.0.0.22）的基线（2026-10-21 离线逆向）。
+ *   相对 popsicle 是非均匀位移（+40..+56），单一 delta 推不对，故 6.6 这份 .ko 直接以 dada 实测为基线：
+ *   在 dada 上自解析 delta=0、指纹通过。来源：锚点 A/B/C（B 是第二种写法 cbz + mov#3001/ccmp）、
+ *   autooff 唯一命中（cycle/temp/rm/fcc/raw_soc/design）、静态反汇编 strategy_fg_ops_get_soc（soc 0xb94）、
+ *   strategy_fg_shutdown（vbatt_empty 0xbfc、mean 0xb64）；fw/sw/empty 照 delay-4/+4/+8。
+ */
+static int OFF_CURRENT      = 0xb58;
+static int OFF_MEAN_VOLT    = 0xb64;
+static int OFF_RAW_SOC      = 0xb88;
+static int OFF_RM_UAH       = 0xb80;
+static int OFF_FCC_UAH      = 0xb84;
+static int OFF_DESIGN_UAH   = 0xba0;
+static int OFF_CYCLE        = 0xb6c;
+static int OFF_TEMP         = 0xb70;
+static int OFF_SOC          = 0xb94;
+static int OFF_VCUT_FW      = 0xbf0;
+static int OFF_VCUT_DELAY   = 0xbf4;
+static int OFF_VCUT_SW      = 0xbf8;
+static int OFF_VBATT_EMPTY  = 0xbfc;
+static int OFF_VPACK_LOW_EN = 0xc05;
+static int OFF_FAKE_SOC     = 0xc6c;
+static int OFF_VPACK        = 0xcf8;
+
+static const int BASE_CURRENT      = 0xb58;
+static const int BASE_MEAN_VOLT    = 0xb64;
+static const int BASE_RAW_SOC      = 0xb88;
+static const int BASE_RM_UAH       = 0xb80;
+static const int BASE_FCC_UAH      = 0xb84;
+static const int BASE_DESIGN_UAH   = 0xba0;
+static const int BASE_CYCLE        = 0xb6c;
+static const int BASE_TEMP         = 0xb70;
+static const int BASE_SOC          = 0xb94;
+static const int BASE_VCUT_FW      = 0xbf0;
+static const int BASE_VCUT_DELAY   = 0xbf4;
+static const int BASE_VCUT_SW      = 0xbf8;
+static const int BASE_VBATT_EMPTY  = 0xbfc;
+static const int BASE_VPACK_LOW_EN = 0xc05;
+static const int BASE_FAKE_SOC     = 0xc6c;
+static const int BASE_VPACK        = 0xcf8;
+#endif
 
 /* ---- 安全红线 ---- */
 #define VCUT_FLOOR 2500
@@ -180,6 +224,15 @@ static int ovr_fcc = -1, ovr_raw_soc = -1, ovr_soc = -1, ovr_design = -1;
 static int t_ovr;		/* 生效的覆盖位图: bit0=current bit1=cycle bit2=temp bit3=rm
 				 * bit4=fcc bit5=raw_soc bit6=soc bit7=design */
 static int t_cyc_ok;		/* 1=cycle 偏移有硬证据（坐实或指纹通过），才允许写 fake_cycle */
+/*
+ * ★2026-10-21：vpack 硬闸门控（OFF_VPACK_LOW_EN）也是会被【写】的字段（kill_vpack_gate、rmmod 写回）。
+ *   锚点B 没找到 gate 时它退回 delta 推导——小米 15 的 6.6 驱动非均匀位移，推出来是 0xc11、真值 0xc05，
+ *   而 validate 只要求该字节 ≤1，错位置上多半也是 0/1，拦不住，会往无关字节写 0。
+ *   所以与 cycle 同一原则：只有锚点直接定到（t_anchors bit3）或指纹证明仍是基线 build 才写；
+ *   不写的代价只是 3000mV 硬闸照旧生效（关机点不低于 3000mV），安全。
+ */
+static int t_gate_ok;
+module_param(t_gate_ok, int, 0444);
 module_param(ovr_current, int, 0444);
 module_param(ovr_cycle, int, 0444);
 module_param(ovr_temp, int, 0444);
@@ -641,7 +694,7 @@ static int vcut_pre(struct kprobe *p, struct pt_regs *regs)
 	wr32(s, OFF_VCUT_DELAY, dl);
 	wr32(s, OFF_VCUT_SW,    sw);
 
-	if (kill_vpack_gate)
+	if (kill_vpack_gate && t_gate_ok)
 		*(volatile u8 *)((char *)s + OFF_VPACK_LOW_EN) = 0;
 
 	/* ============ 伪装循环次数（仅 strategy RAM，不碰电量计）============ */
@@ -865,6 +918,21 @@ static struct kprobe kp = {
 #define V_SUBR32	0x6b000000
 #define M_RET		0xfffffc1f	/* ret */
 #define V_RET		0xd65f0000
+/* ---- 锚点B 的第二种写法（2026-10-21，小米 15 / 6.6 驱动）用到的 3 条 ----
+ *   同一句 `if (vpack_low_en == 1 && vpack <= 3000)`，clang 生成：
+ *          ldrb wG, [x19, #IMM_GATE] ; ... ; cbz wG, ...      ← 门控（不是 cmp #1）
+ *          ldr  wZ, [x19, #IMM_VPACK]
+ *          mov  wK, #3001 ; ccmp wZ, wK, #0, eq               ← vpack < 3001（不是 cmp #3000）
+ *   中间还夹着 bl，ldr 与比较相距 15 条，故另给窗口 ANCHOR_WINDOW_B。
+ *   只在第一种写法没找到时启用，popsicle 系列走原路径不变。 */
+#define M_MOVZ32	0xffe00000	/* mov  wRd,#imm16（hw=0）  */
+#define V_MOVZ32	0x52800000
+#define M_CCMPR32	0xffe00c10	/* ccmp wRn,wRm,#nzcv,cond  */
+#define V_CCMPR32	0x7a400000
+#define M_CBZ32		0xfe000000	/* cbz/cbnz wRt,label       */
+#define V_CBZ32		0x34000000
+#define ANCHOR_WINDOW_B	20
+#define GATE_BEFORE_VPACK 40	/* gate 的 ldrb 须在 vpack 的 ldr 之前 40 条以内 */
 #define REG_ZR		31
 
 static inline int dec_rd(u32 i) { return (int)(i & 0x1f); }
@@ -884,7 +952,10 @@ static int resolve_offsets(void *fn)
 	int ldr_pos[32];	/* 发生在第几条指令 */
 	int ldrb_imm[32];	/* 每个 w 寄存器最近一次 ldrb 自 [x19,#imm] 的偏移 */
 	int ldrb_pos[32];
+	int movz_imm[32];	/* 每个 w 寄存器最近一次 mov #imm16 的值（锚点B 第二种写法）*/
+	int movz_pos[32];
 	int mean = -1, delay = -1, vpack = -1, gate = -1, fsoc = -1;
+	int vpack_ldr_pos = -1, gate_alt = -1, gate_alt_pos = -1;
 	int delay_reg = -1, pend_cmp_reg = -1;
 	int anchors = 0;
 	int i, r, n = 0;
@@ -895,6 +966,7 @@ static int resolve_offsets(void *fn)
 	for (r = 0; r < 32; r++) {
 		ldr_imm[r] = -1;  ldr_pos[r] = -9999;
 		ldrb_imm[r] = -1; ldrb_pos[r] = -9999;
+		movz_imm[r] = -1; movz_pos[r] = -9999;
 	}
 
 	for (i = 0; i < SCAN_MAX_INSN; i++) {
@@ -934,6 +1006,35 @@ static int resolve_offsets(void *fn)
 			continue;
 		}
 
+		/* ---- 锚点B 第二种写法的素材：mov wK,#imm16 ---- */
+		if ((ins & M_MOVZ32) == V_MOVZ32 && dec_rd(ins) != REG_ZR) {
+			rd = dec_rd(ins);
+			movz_imm[rd] = (int)((ins >> 5) & 0xffff);
+			movz_pos[rd] = i;
+			continue;
+		}
+		/* ---- 门控第二种写法：ldrb wG 之后 3 条以内 cbz/cbnz wG（候选，等 vpack 定了再认）---- */
+		if ((ins & M_CBZ32) == V_CBZ32) {
+			rn = dec_rd(ins);	/* Rt 在低 5 位 */
+			if (vpack < 0 && ldrb_imm[rn] >= 0 && i - ldrb_pos[rn] <= 3) {
+				gate_alt = ldrb_imm[rn];
+				gate_alt_pos = ldrb_pos[rn];
+			}
+			continue;
+		}
+		/* ---- vpack 第二种写法：ccmp wZ,wK（wK = 3001 或 3000）---- */
+		if ((ins & M_CCMPR32) == V_CCMPR32) {
+			rn = dec_rn(ins); rm = dec_rm(ins);
+			if (vpack < 0 && (movz_imm[rm] == ANCHOR_VPACK_MV + 1 || movz_imm[rm] == ANCHOR_VPACK_MV) &&
+			    i - movz_pos[rm] <= 4 &&
+			    ldr_imm[rn] >= 0 && i - ldr_pos[rn] <= ANCHOR_WINDOW_B) {
+				vpack = ldr_imm[rn];
+				vpack_ldr_pos = ldr_pos[rn];
+				anchors |= 4;
+			}
+			continue;
+		}
+
 		/* ---- 锚点A2：cmp wRn,wRm 且 Rm 是刚加过 50 的寄存器 ----
 		 *      Rn 那一侧就是 mean_volt（源码：cmp mean, delay+50）*/
 		if ((ins & M_SUBR32) == V_SUBR32 && dec_rd(ins) == REG_ZR) {
@@ -944,6 +1045,14 @@ static int resolve_offsets(void *fn)
 				mean = ldr_imm[rn];
 				anchors |= 2;
 				pend_cmp_reg = -1;
+			} else if (vpack < 0 &&
+				   (movz_imm[rm] == ANCHOR_VPACK_MV + 1 || movz_imm[rm] == ANCHOR_VPACK_MV) &&
+				   i - movz_pos[rm] <= 4 &&
+				   ldr_imm[rn] >= 0 && i - ldr_pos[rn] <= ANCHOR_WINDOW_B) {
+				/* vpack 第二种写法的另一形态：cmp wZ,wK */
+				vpack = ldr_imm[rn];
+				vpack_ldr_pos = ldr_pos[rn];
+				anchors |= 4;
 			}
 			continue;
 		}
@@ -955,6 +1064,7 @@ static int resolve_offsets(void *fn)
 			if (imm == ANCHOR_VPACK_MV && ldr_imm[rn] >= 0 &&
 			    i - ldr_pos[rn] <= ANCHOR_WINDOW && vpack < 0) {
 				vpack = ldr_imm[rn];
+				vpack_ldr_pos = ldr_pos[rn];
 				anchors |= 4;
 			}
 			/* 锚点B2：cmp wRn,#1 且刚 ldrb 过 —— 门控布尔
@@ -979,6 +1089,13 @@ static int resolve_offsets(void *fn)
 			}
 			continue;
 		}
+	}
+
+	/* 门控第二种写法：只在第一种（ldrb + cmp #1）没命中、且候选紧挨在 vpack 加载之前时采用 */
+	if (gate < 0 && gate_alt >= 0 && vpack_ldr_pos >= 0 &&
+	    vpack_ldr_pos > gate_alt_pos && vpack_ldr_pos - gate_alt_pos <= GATE_BEFORE_VPACK) {
+		gate = gate_alt;
+		anchors |= 8;
 	}
 
 	t_scan_insns = n;
@@ -1072,9 +1189,16 @@ struct insn_sig {
 };
 
 static const struct insn_sig sigs[] = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 	{ 0x07c, 0x396aa668, "ldrb w8,[x19,#0xaa9]" },	/* 0.0.32: gate 0xaa1→0xaa9 */
 	{ 0x108, 0xb94a9e68, "ldr  w8,[x19,#0xa9c]" },	/* 0.0.32: delay 0xa94→0xa9c */
 	{ 0x10c, 0xb949fe69, "ldr  w9,[x19,#0x9fc]" },	/* mean_volt 0x9fc 未变 */
+#else
+	/* 小米 15 dada OS4.0.0.22 的 mca_strategy_fg_comp.ko（诊断包离线反汇编）*/
+	{ 0x06c, 0x39701668, "ldrb w8,[x19,#0xc05]" },	/* gate */
+	{ 0x0e4, 0xb94bf668, "ldr  w8,[x19,#0xbf4]" },	/* delay */
+	{ 0x0e8, 0xb94b6669, "ldr  w9,[x19,#0xb64]" },	/* mean_volt */
+#endif
 };
 
 static int sig_ok;
@@ -1198,6 +1322,10 @@ static int __init vcut_init(void)
 	apply_overrides();
 	/* cycle 是唯一会被写的无锚点字段：要么 sysfs 坐实，要么指纹证明仍是基线 build */
 	t_cyc_ok = (t_ovr & 2) || sig_ok;
+	t_gate_ok = (t_anchors & 8) || sig_ok;
+	if (kill_vpack_gate && !t_gate_ok)
+		pr_warn("vcut_lower: vpack_low_en 偏移 0x%x 无硬证据（gate 锚点未命中且指纹不符），"
+			"不摘 3000mV 硬闸（关机点不会低于 3000mV）\n", OFF_VPACK_LOW_EN);
 	if (fake_cycle >= 0 && !t_cyc_ok)
 		pr_warn("vcut_lower: cycle 偏移 0x%x 无硬证据（未坐实且指纹不符），本次不写 fake_cycle\n",
 			OFF_CYCLE);
@@ -1255,7 +1383,8 @@ static void __exit vcut_exit(void)
 			pr_info("vcut_lower: 已卸载，命中 %d 次（观测模式，未改写任何值）\n", t_hits);
 			return;
 		}
-		*(volatile u8 *)((char *)saved_struct + OFF_VPACK_LOW_EN) = saved_vpack_en;
+		if (t_gate_ok)	/* 与写入同一门控：没写过就不写回 */
+			*(volatile u8 *)((char *)saved_struct + OFF_VPACK_LOW_EN) = saved_vpack_en;
 		if (restore_on_exit) {
 			wr32(saved_struct, OFF_VCUT_FW,    saved_fw);
 			wr32(saved_struct, OFF_VCUT_DELAY, saved_delay);

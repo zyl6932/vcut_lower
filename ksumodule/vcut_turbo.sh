@@ -100,7 +100,9 @@ resolve_zone() {
   done
   echo "$_rz"
 }
-CT=$(resolve_zone charger_therm)
+# 充电电路温度：小米 15（dada）叫 charger_therm0
+resolve_ct() { _c=$(resolve_zone charger_therm); [ -n "$_c" ] || _c=$(resolve_zone charger_therm0); echo "$_c"; }
+CT=$(resolve_ct)
 CN=$(resolve_zone conn_therm)
 
 # ---- rd VAR FILE : 零 fork 读一个数字，读不到/非数字则 0 ----
@@ -203,7 +205,7 @@ while true; do
   if [ -z "$CT" ] || [ -z "$CN" ]; then
     rescan=$((rescan + 1))
     if [ $((rescan % 20)) = 1 ]; then
-      [ -z "$CT" ] && CT=$(resolve_zone charger_therm)
+      [ -z "$CT" ] && CT=$(resolve_ct)
       [ -z "$CN" ] && CN=$(resolve_zone conn_therm)
       [ -n "$CT" ] && [ -n "$CN" ] && log "温度节点已解析: $CT $CN"
     fi

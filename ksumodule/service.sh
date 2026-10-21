@@ -98,8 +98,15 @@ if [ "$AUTO_OFF" = "1" ] && [ -f "$MODDIR/autooff.sh" ]; then
   log "autooff: ${OVR:-（无坐实结果，全部沿用 delta）}"
 fi
 
+# 按内核选 .ko：17 系列 6.12/android16 用 vcut_lower.ko；小米 15 等 6.6/android15 用 vcut_lower_6.6.ko（2026-10-21）
+KO="$MODDIR/vcut_lower.ko"
+case "$(uname -r)" in
+  6.6.*) KO="$MODDIR/vcut_lower_6.6.ko" ;;
+esac
+[ -f "$KO" ] || log "★没有适配本内核 $(uname -r) 的模块文件 ${KO##*/}（只采集诊断，不加载）"
+log "模块文件: ${KO##*/}"
 # shellcheck disable=SC2086  # $OVR 需要按空格拆成多个参数
-insmod "$MODDIR/vcut_lower.ko" $OVR \
+insmod "$KO" $OVR \
     enable="$ENABLE" \
     vcut_fw="$VCUT_FW" vcut_delay="$VCUT_DELAY" vcut_sw="$VCUT_SW" \
     kill_vpack_gate="$KILL_VPACK_GATE" \

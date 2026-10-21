@@ -7,7 +7,8 @@ ui_print "-   降低软件关机电压 / 电量全程均匀下降"
 # ★2026-10-21 起支持「其他机型观测模式」：
 #   已验证机型（诊断包经 tools/analyze_diag.py 全部通过、真机跑通）正常生效：
 #     popsicle（小米 17 Pro Max）、pandora（小米 17 Pro，2026-10-21 OS4.0.0.38 验证）、
-#     pudding（小米 17，2026-10-21 OS4.0.4.0：mca_strategy_fg_comp.ko 与 popsicle 同版本逐字节相同）；
+#     pudding（小米 17，2026-10-21 OS4.0.4.0：mca_strategy_fg_comp.ko 与 popsicle 同版本逐字节相同）、
+#     nezha（小米 17 Ultra，2026-10-21 OS4.0.4.0 诊断全过、正常模式 armed=1 跑通；原厂关机电压 2850）；
 #   其他机型只要有小米 MCA 电量驱动（目标符号在 kallsyms 里），就以【观测模式】安装：
 #   模块只读不写（enable=0），开机自动采集诊断包，发回分析后再决定能否开启。
 DEV=$(getprop ro.product.device)
@@ -41,6 +42,9 @@ case "$DEV" in
   pudding)
     MODE=full
     ui_print "- 机型: 小米 17（已验证）→ 正常模式" ;;
+  nezha)
+    MODE=full
+    ui_print "- 机型: 小米 17 Ultra（已验证）→ 正常模式" ;;
   *)
     MODE=probe
     ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -55,6 +59,12 @@ esac
 case "$KREL" in
   6.12.*-android16-*)
     ui_print "- 内核系列匹配 (android16-6.12)" ;;
+  6.6.*-android15-*)
+    if [ -f "$MODPATH/vcut_lower_6.6.ko" ]; then
+      ui_print "- 内核系列匹配 (android15-6.6，小米 15 等，适配中)"
+    else
+      ui_print "! android15-6.6 内核：本包未带 6.6 模块，只采集诊断"
+    fi ;;
   *)
     ui_print "! 内核不是 android16-6.12 系列，模块大概率加载失败"
     ui_print "! （安全失败：不会加载、不写内核内存；诊断包照常生成）"
@@ -100,8 +110,13 @@ rm -f /dev/vcut_def.sh
 
 # 充电阶梯（v1.9）：第一次装带阶梯的版本时，从本机设备树读原厂 FFC 表（25~35℃）作默认值。
 #   表是三元组「拐点电压 拐点前电流 拐点后电流」；截止(≤4495)以上的拐点不算。读不到就不配阶梯（全程 FORCE_MA）。
-if [ ! -f "$DATA/.ladder_init" ]; then
-  QC=/proc/device-tree/soc/mca_strategy_quick_charge/ffc_para_25_35
+# 阶梯为空也重新读：17 Ultra 第一次装 v1.9 时没找到带后缀的表，写了空阶梯又打了初始化标记
+if [ ! -f "$DATA/.ladder_init" ] || ! grep -q '^LADDER_V=[0-9]' "$CFG"; then
+  # 双电芯供应商的机型（17 Ultra）表名带电芯厂商后缀：ffc_para_25_35_atl / _lwn，按 fg_master/cell_vendor 选
+  QD=/proc/device-tree/soc/mca_strategy_quick_charge
+  CV=$(cat /sys/devices/virtual/xm_power/fg_master/cell_vendor 2>/dev/null)
+  QC=$QD/ffc_para_25_35
+  [ -f "$QC" ] || QC=$QD/ffc_para_25_35_$CV
   lv=; lm=
   if [ -f "$QC" ]; then
     set -- $(tr '\0' ' ' < "$QC")
@@ -148,6 +163,7 @@ set_perm "$MODPATH/autooff.sh"   0 0 0755
 set_perm "$MODPATH/collect.sh"   0 0 0755
 set_perm "$MODPATH/vcut_turbo.sh" 0 0 0755
 set_perm "$MODPATH/vcut_lower.ko" 0 0 0644
+[ -f "$MODPATH/vcut_lower_6.6.ko" ] && set_perm "$MODPATH/vcut_lower_6.6.ko" 0 0 0644
 set_perm "$MODPATH/module.prop"  0 0 0644
 set_perm_recursive "$DATA" 0 0 0700 0600
 

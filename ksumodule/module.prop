@@ -3,4 +3,4 @@ name=VCut Lower
 version=v1.9-ladder
 versionCode=19000
 author=zyl6932
-description=降低软件关机电压、均匀电量显示，并集成充电增强（原 TurboCharge）。小米 17 Pro Max(popsicle)、17 Pro(pandora)、17(pudding) 正常生效；其他带小米 MCA 电量驱动的机型以观测模式安装（只读），自动生成诊断包供适配。
+description=降低软件关机电压、均匀电量显示，并集成充电增强（原 TurboCharge）。小米 17 Pro Max(popsicle)、17 Pro(pandora)、17(pudding)、17 Ultra(nezha) 正常生效；其他带小米 MCA 电量驱动的机型以观测模式安装（只读），自动生成诊断包供适配。

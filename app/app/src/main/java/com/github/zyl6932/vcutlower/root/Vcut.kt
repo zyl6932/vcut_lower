@@ -281,8 +281,12 @@ object Vcut {
 
     suspend fun stockTables(): Map<String, List<IntArray>> {
         val r = RootShell.run(
-            "for f in $QC/ffc_para_* $QC/normal_para_*; do [ -f \"${'$'}f\" ] && " +
-                "echo \"${'$'}{f##*/}=${'$'}(tr '\\0' ' ' < ${'$'}f)\"; done"
+            // 双电芯供应商的机型（17 Ultra）表名带后缀 _atl / _lwn：本机电芯（fg_master/cell_vendor）的去掉后缀
+            // 当成通用名，别家的（以字母结尾）跳过；通用名本身以数字结尾，不受影响
+            "CV=${'$'}(cat $FGM/cell_vendor 2>/dev/null); " +
+                "for f in $QC/ffc_para_* $QC/normal_para_*; do [ -f \"${'$'}f\" ] || continue; n=${'$'}{f##*/}; " +
+                "case \"${'$'}n\" in *_\"${'$'}CV\") n=${'$'}{n%_${'$'}CV} ;; *[a-z]) continue ;; esac; " +
+                "echo \"${'$'}n=${'$'}(tr '\\0' ' ' < ${'$'}f)\"; done"
         ) ?: return emptyMap()
         return r.out.lines().mapNotNull { line ->
             val name = line.substringBefore('=', "").ifEmpty { return@mapNotNull null }

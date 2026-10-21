@@ -41,7 +41,8 @@ def load_base():
     base = {}
     for m in re.finditer(r'static const int BASE_(\w+)\s*=\s*(0x[0-9a-fA-F]+);',
                          open(SRC, encoding='utf-8').read()):
-        base[m.group(1).lower()] = int(m.group(2), 16)
+        # 源码里 #if 分两套：先出现的是 6.12（17 系列）的编译期基线，6.6（小米 15）那套不覆盖它
+        base.setdefault(m.group(1).lower(), int(m.group(2), 16))
     return base
 
 
@@ -129,6 +130,18 @@ def ladder_of(tab, ceil=4495):
     return nodes, ma
 
 
+def cell_vendor(root):
+    """diag.txt 的 fg_master 节里的 cell_vendor（atl / lwn …）"""
+    sec = ''
+    for line in open(os.path.join(root, 'diag.txt'), encoding='utf-8', errors='replace'):
+        m = re.match(r'===== (.*) =====', line)
+        if m:
+            sec = m.group(1)
+        elif sec == 'fg_master' and line.startswith('cell_vendor='):
+            return line.split('=', 1)[1].strip()
+    return ''
+
+
 def charge_report(root):
     """[5] 充电增强。返回结论列表（只描述充电增强，不影响降关机电压的判定）"""
     print('\n[5] 充电增强（charge.txt）')
@@ -169,14 +182,18 @@ def charge_report(root):
     qc = dt_props(secs.get('dt/mca_strategy_quick_charge', []))
     bk = dt_props(secs.get('dt/mca_strategy_buckchg_class', []))
     if qc:
-        tabs = sorted(k for k in qc if re.match(r'(ffc|normal)_para_\d+_\d+$', k))
+        tabs = sorted(k for k in qc if re.match(r'(ffc|normal)_para_\d+_\d+(_[a-z]+)?$', k))
         print('   原厂阶梯表：' + (' '.join(tabs) or '（无）'))
         for k in ('real_curr_max', 'max_vbat'):
             if qc.get(k):
                 print(f'   {k} = {qc[k][0]}')
         if bk.get('ffc_temp_low') and bk.get('ffc_temp_high'):
             print(f"   FFC 温度区间 {bk['ffc_temp_low'][0]}~{bk['ffc_temp_high'][0]} ℃")
-        base = qc.get('ffc_para_25_35')
+        # 双电芯供应商的机型（17 Ultra）表名带 _atl / _lwn 后缀，按 fg_master/cell_vendor 选（与 customize.sh 同一规则）
+        cv = cell_vendor(root)
+        base = qc.get('ffc_para_25_35') or qc.get(f'ffc_para_25_35_{cv}')
+        if base and 'ffc_para_25_35' not in qc:
+            print(f'   电芯厂商 cell_vendor={cv} → 用 ffc_para_25_35_{cv}')
         if base:
             tab = [int(x) for x in base if re.match(r'-?\d+$', x)]
             print('   ffc_para_25_35 = ' + ' | '.join(' '.join(map(str, tab[i:i + 3]))
@@ -193,6 +210,10 @@ def charge_report(root):
         f = line.split()
         if len(f) >= 3:
             zones[f[1]] = (f[0], f[2])
+    # 充电电路温度：小米 15（dada）叫 charger_therm0，守护进程同样会退而求其次
+    if 'charger_therm' not in zones and 'charger_therm0' in zones:
+        zones['charger_therm'] = zones['charger_therm0']
+        print('   （charger_therm 不存在，用 charger_therm0）')
     for z in ('charger_therm', 'conn_therm'):
         print(f'   温度节点 {z:14s}: ' + (f'{zones[z][0]} = {zones[z][1]}' if z in zones else '✗ 没有'))
     tz_ok = 'charger_therm' in zones and 'conn_therm' in zones

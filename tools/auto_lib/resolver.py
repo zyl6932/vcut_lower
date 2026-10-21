@@ -215,6 +215,25 @@ def anchor_gate_vpack(insns):
             continue
         vpack_cands.append({'vpack': vpack, 'vpack_idx': v_idx,
                             'vpack_insn': insns[v_idx], 'cmpi': i})
+    # 第二种写法（2026-10-21，小米 15 / 6.6 驱动）：mov wK,#3001 ; ccmp|cmp wZ,wK —— 即 vpack < 3001。
+    # 只在第一种写法没找到时采用，与 vcut_lower.c 内核侧扫描同一规则
+    if not vpack_cands:
+        for i, it in enumerate(insns):
+            if it.mnemonic not in ('ccmp', 'cmp'):
+                continue
+            m = re.match(r'w(\d+), w(\d+)', it.op_str)
+            if not m:
+                continue
+            zreg, kreg = int(m.group(1)), int(m.group(2))
+            if not any(insns[j].mnemonic == 'mov' and
+                       re.match(rf'w{kreg}, #(0xbb9|0xbb8|3001|3000)$', insns[j].op_str)
+                       for j in range(max(0, i - 4), i)):
+                continue
+            v_idx, vpack = _find_ldr_of(insns, i, zreg, limit=20)
+            if vpack is not None:
+                vpack_cands.append({'vpack': vpack, 'vpack_idx': v_idx,
+                                    'vpack_insn': insns[v_idx], 'cmpi': i})
+                break
     if len(vpack_cands) != 1:
         raise ResolveError(
             f"锚点B（vpack, cmp #3000）候选 {len(vpack_cands)} 个，期望唯一 -> 拒绝解析")
@@ -239,6 +258,12 @@ def anchor_gate_vpack(insns):
                     gate = int(gm.group(2), 16)
                     gate_idx = j
                     break
+        # 第二种写法：ldrb wG 之后 3 条以内 cbz/cbnz wG（小米 15 / 6.6 驱动）
+        if any(insns[k].mnemonic in ('cbz', 'cbnz') and insns[k].op_str.startswith(f'w{greg},')
+               for k in range(j + 1, min(len(insns), j + 4))):
+            gate = int(gm.group(2), 16)
+            gate_idx = j
+            break
     if gate is None:
         raise ResolveError("锚点B（gate）未找到 ldrb+cmp #1 模式 -> 拒绝解析")
     v['gate'] = gate
