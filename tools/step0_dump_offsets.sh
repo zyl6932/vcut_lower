@@ -37,21 +37,25 @@ echo "  原 tracing_on = $OLD_ON"
 echo '-:fgdump' >> $TR/kprobe_events 2>/dev/null
 
 ARGS="self=%x0:x64"
-# ★2026-08-29 更新为 OS4.0.0.25 的偏移（在 OS4.0.0.20 基础上整体再 +0x10，无例外）
-#   上一版（OS4.0.0.20）整体 +0x1A8，其 vpack 闸是例外 0xa91（不是位移得到的 0xa90）
-#   本次位移后 gate 落在 0xaa1，而 0xaa0 正是那个 8 处引用的高频标志 —— 别写它
+# ★2026-09-04 更新为 OS4.0.0.32 的偏移（【非均匀位移】：mean 不动，raw_soc/soc/
+#   design +4，vcut 块及以后 +8；两处各插 4 字节）。逐偏移已用密集网格 dump 对 sysfs 坐实。
+#   gate 落在 0xaa9，而 0xaa8 才是那个 8 处引用的高频标志 —— 别写它。
 ARGS="$ARGS cur9f0=+0x9f0(%x0):s32"
 ARGS="$ARGS mean9fc=+0x9fc(%x0):s32"
 ARGS="$ARGS cyca04=+0xa04(%x0):s32"
 ARGS="$ARGS tmpa08=+0xa08(%x0):s32"
-ARGS="$ARGS soca38=+0xa38(%x0):s32"
-ARGS="$ARGS fwa90=+0xa90(%x0):s32"
-ARGS="$ARGS dlya94=+0xa94(%x0):s32"
-ARGS="$ARGS swa98=+0xa98(%x0):s32"
-ARGS="$ARGS emptya9c=+0xa9c(%x0):u8"
-ARGS="$ARGS gateaa1=+0xaa1(%x0):u8"
-ARGS="$ARGS fsocb04=+0xb04(%x0):s32"
-ARGS="$ARGS vpackb90=+0xb90(%x0):s32"
+ARGS="$ARGS rma1c=+0xa1c(%x0):s32"
+ARGS="$ARGS fcca20=+0xa20(%x0):s32"
+ARGS="$ARGS rawa28=+0xa28(%x0):s32"
+ARGS="$ARGS soca3c=+0xa3c(%x0):s32"
+ARGS="$ARGS dsga48=+0xa48(%x0):s32"
+ARGS="$ARGS fwa98=+0xa98(%x0):s32"
+ARGS="$ARGS dlya9c=+0xa9c(%x0):s32"
+ARGS="$ARGS swaa0=+0xaa0(%x0):s32"
+ARGS="$ARGS emptyaa4=+0xaa4(%x0):u8"
+ARGS="$ARGS gateaa9=+0xaa9(%x0):u8"
+ARGS="$ARGS fsocb0c=+0xb0c(%x0):s32"
+ARGS="$ARGS vpackb98=+0xb98(%x0):s32"
 ARGS="$ARGS arg1v=+0(%x1):s32"
 
 echo "p:fgdump $SYM $ARGS" >> $TR/kprobe_events 2>&1

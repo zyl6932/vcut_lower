@@ -23,8 +23,27 @@
 #define TARGET_SYM "mca_battery_shutdown_check_shutdown_delay"
 
 /* ---- strategy_fg struct 偏移 ----
- * ★2026-08-29 为 OS4.0.0.25 重新坐实（内核版本串未变，vendor 模块换了 build）。
- *   struct 整体再后移 +0x10。这次【没有】例外，16 项全部遵守位移。
+ * ★2026-09-04 为 OS4.0.0.32 重新坐实（内核版本串仍未变，vendor 模块又换 build）。
+ *   ★★这次是【非均匀位移】——首次出现，也正是它把"单一 delta 自解析"打穿了：
+ *     mean_volt(0x9fc) 不动，但结构体里插了两处各 4 字节：
+ *       (a) raw_soc 附近插 4 字节 → raw_soc/soc/design 各 +4
+ *       (b) design 与 vcut 块之间再插 4 字节 → vcut_fw/delay/sw/empty/gate/
+ *           fake_soc/vpack 各 +8
+ *   自解析用 mean_volt 推 delta 得 0，把 fw/sw/empty 留在旧偏移（0.0.25），
+ *   而锚点把 delay/gate/vpack/fake_soc 正确定到 +8 → 二者错位 → validate 失败
+ *   → armed=0 → 自动卸载。真机连续 2 次开机不稳定后模块自停用（boot.log 实录）。
+ *   独立坐实手段：tracefs 只读密集网格 dump（0x9e0..0xba4 逐字），逐偏移对 sysfs：
+ *     0x9fc=4301≈voltage / 0xa04=408=cyclecount / 0xa1c=5501000=rm /
+ *     0xa20=7208000=charger_full / 0xa28=7631=raw_soc / 0xa3c=78=capacity /
+ *     0xa48=7500000=design / 0xa98=3130=cutoff / 0xaa0=3030=sw / 0xb0c=-1=fake_soc /
+ *     0xb98=4278=vpack。
+ *   ★对策（resolve_offsets 已随之加固）：vcut 三兄弟 + vbatt_empty 结构上永远
+ *     紧贴 delay（fw=delay-4 / sw=delay+4 / empty=delay+8，4 次 build 无一例外），
+ *     故改由【锚点 delay】直接推导，不再吃全局 delta。这样即便再来一次非均匀位移，
+ *     只要 delay 锚点命中，这 4 个"会被写"的字段就一定跟着对。
+ *
+ * ★2026-08-29 为 OS4.0.0.25 坐实（内核版本串未变，vendor 模块换了 build）。
+ *   struct 整体再后移 +0x10。那次【没有】例外，16 项全部遵守位移。
  *
  *   三重独立证据：
  *   (1) 静态反汇编：vcut_delay/mean_volt/vpack_gate/vpack/current/fake_soc 六项
@@ -64,41 +83,41 @@
  *     vpack_low_en / fake_soc），其余靠位移量 delta 从基线推导。
  * ============================================================================
  */
-static int OFF_CURRENT      = 0x9f0;  /* s32 uA，★正=放电                （旧 0x9e0）*/
-static int OFF_MEAN_VOLT    = 0x9fc;  /* s32 mV，近5样本均值；电压闸与判空都比它（旧 0x9ec）*/
-static int OFF_RAW_SOC      = 0xa24;  /* s32 厘百分比 = rm/FCC×10000      （旧 0xa14）*/
-static int OFF_RM_UAH       = 0xa1c;  /* s32 µAh 剩余容量  = fg_master/rm  （旧 0xa0c）*/
-static int OFF_FCC_UAH      = 0xa20;  /* s32 µAh 满充容量  = charger_full  （旧 0xa10）*/
-static int OFF_DESIGN_UAH   = 0xa44;  /* s32 µAh 设计容量  = design_capacity（旧 0xa34）*/
-static int OFF_CYCLE        = 0xa04;  /* s32 循环次数                     （旧 0x9f4）*/
-static int OFF_TEMP         = 0xa08;  /* s32 0.1 degC                     （旧 0x9f8）*/
-static int OFF_SOC          = 0xa38;  /* s32 内部 soc                     （旧 0xa28）*/
-static int OFF_VCUT_FW      = 0xa90;  /* s32 mV                           （旧 0xa80）*/
-static int OFF_VCUT_DELAY   = 0xa94;  /* s32 mV ← 电压闸：mean_volt <= 此值即关机（旧 0xa84）*/
-static int OFF_VCUT_SW      = 0xa98;  /* s32 mV ← UI 判空阈值             （旧 0xa88）*/
-static int OFF_VBATT_EMPTY  = 0xa9c;  /* u8  判空标志                     （旧 0xa8c）*/
-static int OFF_VPACK_LOW_EN = 0xaa1;  /* u8  support-vpack-low-shutdown（3000mV 硬闸门控）
-                                  * ★旧 0xa91；不是 0xaa0（8 处引用的高频标志）*/
-static int OFF_FAKE_SOC     = 0xb04;  /* s32 -1=off                       （旧 0xaf4）*/
-static int OFF_VPACK        = 0xb90;  /* s32 mV                           （旧 0xb80）*/
+static int OFF_CURRENT      = 0x9f0;  /* s32 uA，★正=放电         （0.0.25 同；旧 0x9e0）*/
+static int OFF_MEAN_VOLT    = 0x9fc;  /* s32 mV，近5样本均值；电压闸与判空都比它（0.0.25 同）*/
+static int OFF_RAW_SOC      = 0xa28;  /* s32 厘百分比 = rm/FCC×10000 （0.0.25 0xa24 → +4）*/
+static int OFF_RM_UAH       = 0xa1c;  /* s32 µAh 剩余容量  = fg_master/rm  （0.0.25 同）*/
+static int OFF_FCC_UAH      = 0xa20;  /* s32 µAh 满充容量  = charger_full  （0.0.25 同）*/
+static int OFF_DESIGN_UAH   = 0xa48;  /* s32 µAh 设计容量  = design_capacity（0.0.25 0xa44 → +4）*/
+static int OFF_CYCLE        = 0xa04;  /* s32 循环次数                     （0.0.25 同）*/
+static int OFF_TEMP         = 0xa08;  /* s32 0.1 degC                     （0.0.25 同）*/
+static int OFF_SOC          = 0xa3c;  /* s32 内部 soc                     （0.0.25 0xa38 → +4）*/
+static int OFF_VCUT_FW      = 0xa98;  /* s32 mV                           （0.0.25 0xa90 → +8）*/
+static int OFF_VCUT_DELAY   = 0xa9c;  /* s32 mV ← 电压闸：mean_volt <= 此值即关机（0.0.25 0xa94 → +8）*/
+static int OFF_VCUT_SW      = 0xaa0;  /* s32 mV ← UI 判空阈值             （0.0.25 0xa98 → +8）*/
+static int OFF_VBATT_EMPTY  = 0xaa4;  /* u8  判空标志                     （0.0.25 0xa9c → +8）*/
+static int OFF_VPACK_LOW_EN = 0xaa9;  /* u8  support-vpack-low-shutdown（3000mV 硬闸门控）
+                                  * ★0.0.25 0xaa1 → +8；不是 0xaa8（8 处引用的高频标志）*/
+static int OFF_FAKE_SOC     = 0xb0c;  /* s32 -1=off                       （0.0.25 0xb04 → +8）*/
+static int OFF_VPACK        = 0xb98;  /* s32 mV                           （0.0.25 0xb90 → +8）*/
 
 /* 编译期基线的副本：解析出 delta 后要据此推导其余字段，基线本身不能被覆盖 */
 static const int BASE_CURRENT      = 0x9f0;
 static const int BASE_MEAN_VOLT    = 0x9fc;
-static const int BASE_RAW_SOC      = 0xa24;
+static const int BASE_RAW_SOC      = 0xa28;
 static const int BASE_RM_UAH       = 0xa1c;
 static const int BASE_FCC_UAH      = 0xa20;
-static const int BASE_DESIGN_UAH   = 0xa44;
+static const int BASE_DESIGN_UAH   = 0xa48;
 static const int BASE_CYCLE        = 0xa04;
 static const int BASE_TEMP         = 0xa08;
-static const int BASE_SOC          = 0xa38;
-static const int BASE_VCUT_FW      = 0xa90;
-static const int BASE_VCUT_DELAY   = 0xa94;
-static const int BASE_VCUT_SW      = 0xa98;
-static const int BASE_VBATT_EMPTY  = 0xa9c;
-static const int BASE_VPACK_LOW_EN = 0xaa1;
-static const int BASE_FAKE_SOC     = 0xb04;
-static const int BASE_VPACK        = 0xb90;
+static const int BASE_SOC          = 0xa3c;
+static const int BASE_VCUT_FW      = 0xa98;
+static const int BASE_VCUT_DELAY   = 0xa9c;
+static const int BASE_VCUT_SW      = 0xaa0;
+static const int BASE_VBATT_EMPTY  = 0xaa4;
+static const int BASE_VPACK_LOW_EN = 0xaa9;
+static const int BASE_FAKE_SOC     = 0xb0c;
+static const int BASE_VPACK        = 0xb98;
 
 /* ---- 安全红线 ---- */
 #define VCUT_FLOOR 2500
@@ -705,11 +724,17 @@ static struct kprobe kp = {
  * ★AArch64 的 LDR/LDRB(立即数) 把偏移直接编码在 imm12 字段里，
  *   所以校验这几条指令 = 直接验证【代码本身在用哪个偏移】，这是硬证据。
  *
- *   ★2026-08-29 为 OS4.0.0.25 的 vendor 模块重新取指纹。
- *     本次【指令位置没变，只有 imm12 变了】（struct 挪了 +0x10，函数体未重排）：
- *     probe+0x07c: 0x396a8668 = ldrb w8,[x19,#0xaa1]   imm12=0xaa1, scale 1
- *     probe+0x108: 0xb94a9668 = ldr  w8,[x19,#0xa94]   imm12=0x2a5 -> 0x2a5*4=0xa94
- *     probe+0x10c: 0xb949fe69 = ldr  w9,[x19,#0x9fc]   imm12=0x27f -> 0x27f*4=0x9fc
+ *   ★2026-09-04 为 OS4.0.0.32 的 vendor 模块重新取指纹。
+ *     指令位置仍没变（函数体未重排），gate 与 delay 的 imm12 各 +8（对应 struct
+ *     那处 +8 位移），mean_volt 那条一字未动：
+ *     probe+0x07c: 0x396aa668 = ldrb w8,[x19,#0xaa9]   imm12=0xaa9, scale 1
+ *     probe+0x108: 0xb94a9e68 = ldr  w8,[x19,#0xa9c]   imm12=0x2a7 -> 0x2a7*4=0xa9c
+ *     probe+0x10c: 0xb949fe69 = ldr  w9,[x19,#0x9fc]   imm12=0x27f -> 0x27f*4=0x9fc（未变）
+ *
+ *   旧版（OS4.0.0.25 / 6.12.69-android16-6，仅作追溯）：
+ *     probe+0x07c: 0x396a8668 = ldrb w8,[x19,#0xaa1]
+ *     probe+0x108: 0xb94a9668 = ldr  w8,[x19,#0xa94]
+ *     probe+0x10c: 0xb949fe69 = ldr  w9,[x19,#0x9fc]
  *
  *   旧版（OS4.0.0.20 / 6.12.69-android16-6，仅作追溯）：
  *     probe+0x07c: 0x396a4668 = ldrb w8,[x19,#0xa91]
@@ -946,6 +971,25 @@ static int resolve_offsets(void *fn)
 		if (gate  >= 0) OFF_VPACK_LOW_EN = gate;
 		if (fsoc  >= 0) OFF_FAKE_SOC     = fsoc;
 
+		/* ---- ★2026-09-04 加固：vcut 三兄弟 + vbatt_empty 紧贴 delay 推导 ----
+		 *   教训来自 OS4.0.0.32 的【非均匀位移】：mean_volt 不动、delay/gate/
+		 *   fake_soc/vpack 各 +8，中间还夹了一处 +4 —— 全局 delta（由 mean 推）
+		 *   算成 0，把 fw/sw/empty 留在了旧偏移，validate 直接挂。
+		 *   而 fw/delay/sw/empty 在结构体里是驱动 update_vcutoff_para 就地写的
+		 *   连续簇，相对间距【跨 4 次 build 恒定】：
+		 *     fw=delay-4  sw=delay+4  vbatt_empty=delay+8
+		 *   （OS3.0 0x8d8/0x8dc/0x8e0/0x8e4、0.0.20 0xa80.. 、0.0.25 0xa90.. 、
+		 *     0.0.32 0xa98/0xa9c/0xaa0/0xaa4 全部吻合）。
+		 *   这 4 个恰恰是本模块会【主动写】的字段，用锚点 delay 直接钉死，
+		 *   比吃全局 delta 稳得多——只要 delay 锚点命中就一定对。
+		 *   （current/cycle/temp/rm/fcc/raw_soc/soc/design 仍走 delta，它们只读，
+		 *    且都在 validate 的核对范围内，错了会被 armed=0 兜住。）*/
+		if (delay >= 0) {
+			OFF_VCUT_FW     = delay - 4;
+			OFF_VCUT_SW     = delay + 4;
+			OFF_VBATT_EMPTY = delay + 8;
+		}
+
 		/* 锚点与 delta 推导不一致时告警：历史上 gate 就有 ±1 的偏差，
 		 * 那是"简单位移会写错高频标志"的已知现象，锚点是对的。*/
 		if (gate >= 0 && (BASE_VPACK_LOW_EN + delta) != gate)
@@ -975,9 +1019,9 @@ struct insn_sig {
 };
 
 static const struct insn_sig sigs[] = {
-	{ 0x07c, 0x396a8668, "ldrb w8,[x19,#0xaa1]" },
-	{ 0x108, 0xb94a9668, "ldr  w8,[x19,#0xa94]" },
-	{ 0x10c, 0xb949fe69, "ldr  w9,[x19,#0x9fc]" },
+	{ 0x07c, 0x396aa668, "ldrb w8,[x19,#0xaa9]" },	/* 0.0.32: gate 0xaa1→0xaa9 */
+	{ 0x108, 0xb94a9e68, "ldr  w8,[x19,#0xa9c]" },	/* 0.0.32: delay 0xa94→0xa9c */
+	{ 0x10c, 0xb949fe69, "ldr  w9,[x19,#0x9fc]" },	/* mean_volt 0x9fc 未变 */
 };
 
 static int sig_ok;
@@ -1011,7 +1055,7 @@ static int check_insn_sig(void)
 		       bad, (int)ARRAY_SIZE(sigs));
 		return 0;
 	}
-	pr_info("vcut_lower: 指令指纹校验通过（%d 条），偏移 0x9fc/0xa94/0xaa1 与代码一致\n",
+	pr_info("vcut_lower: 指令指纹校验通过（%d 条），偏移 0x9fc/0xa9c/0xaa9 与代码一致\n",
 		(int)ARRAY_SIZE(sigs));
 	return 1;
 }

@@ -1,6 +1,6 @@
 id=vcut_lower
 name=VCut Lower
-version=v1.3-2620-os4.0.0.25
-versionCode=13000
+version=v1.4-2620-os4.0.0.32
+versionCode=14000
 author=zyl6932
-description=降低关机电压到可调值（当前 2620mV），并让电量百分比全程均匀下降。仅适用于 popsicle / 6.12.69-android16-6 / HyperOS OS4.0.0.25。
+description=降低关机电压到可调值（当前 2620mV），并让电量百分比全程均匀下降。仅适用于 popsicle / 6.12.69-android16-6 / HyperOS OS4.0.0.32。

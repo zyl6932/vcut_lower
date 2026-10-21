@@ -3,7 +3,7 @@
 小米 17 Pro Max（popsicle）的 kprobe 内核模块：把软件关机电压降到可调值，
 并在内核侧接管电量显示，使百分比全程按同一 mAh 刻度均匀下降。
 
-**⚠️ 当前适配 popsicle + `6.12.69-android16-6-*`（HyperOS OS4.0.0.25）。**
+**⚠️ 当前适配 popsicle + `6.12.69-android16-6-*`（HyperOS OS4.0.0.32）。**
 struct 偏移是针对该 build 逆向得到的，其他机型/内核几乎必然不同。
 
 ### ★系统更新后通常【不需要】回电脑重编（2026-08-29 起）
@@ -22,6 +22,37 @@ cat /sys/module/vcut_lower/parameters/t_anchors    # 0x1f = 5 个锚点全命中
 详见下面「系统更新后怎么办」。
 
 ---
+
+### OS4.0.0.25 → OS4.0.0.32 迁移要点（2026-09-04）
+
+内核版本串**仍一字未变**（`6.12.69-android16-6-gb1493ec68d4a-abogki515789973-4k`），
+又只是 vendor 模块 `mca_strategy_fg_comp.ko` 换了 build。**但这次是【非均匀位移】——
+首次出现，也正是它把"单一 delta 自解析"打穿了**：模块 `insmod rc=0`（CRC 照过）却
+`armed=0`（validate 失败）自动卸载，连续 2 次开机不稳定后自停用（boot.log 实录）。
+
+| 项 | OS4.0.0.25 | OS4.0.0.32 |
+|---|---|---|
+| 内核版本串 | `gb1493ec68d4a-abogki515789973` | **不变** |
+| 位移方式 | 整体 +0x10（均匀） | **非均匀**：插了两处各 4 字节 |
+| mean_volt | 0x9fc | **0x9fc（不动）** |
+| raw_soc / soc / design | 0xa24 / 0xa38 / 0xa44 | **0xa28 / 0xa3c / 0xa48（各 +4）** |
+| vcut_fw/delay/sw/empty | 0xa90/0xa94/0xa98/0xa9c | **0xa98/0xa9c/0xaa0/0xaa4（各 +8）** |
+| vpack 闸门控字节 | `0xaa1` | **`0xaa9`**（★不是 `0xaa8`，那是 8 处引用的高频标志）|
+| fake_soc / vpack | 0xb04 / 0xb90 | **0xb0c / 0xb98（各 +8）** |
+| 符号 CRC（含 module_layout/param_ops_int）| — | **全部未变**（内核未换，patch 值照旧）|
+| `struct module` 布局 / kCFI 哈希 | init@0x188 exit@0x5f8 / 0xc073bc77 | **不变** |
+| 三条指纹指令位置 | +0x07c/0x108/0x10c | **位置不变**，gate/delay 的 imm12 各 +8，mean 那条不变 |
+
+**★为什么自解析这次没兜住**：resolve_offsets 只从 mean_volt 推一个全局 delta，
+mean 没动 → delta=0 → 把 fw/sw/empty 留在了旧偏移，而锚点把 delay/gate/fake_soc/vpack
+正确定到 +8 → 二者错位 → validate 失败。**已加固**：vcut 三兄弟 + vbatt_empty
+在结构体里永远紧贴 delay（fw=delay-4 / sw=delay+4 / empty=delay+8，跨 4 次 build 恒定），
+改由锚点 delay 直接推导，不再吃全局 delta —— 这 4 个"会被写"的字段今后只要 delay
+锚点命中就一定对。坐实手段：tracefs 只读密集网格 dump（`tools/gridump` 思路，逐字对 sysfs）。
+
+**★指纹/CRC 均按同一流程**：编译（用原 6.12.23 树，内核未换）→ `patch_crc`
+（值不变：`module_layout=797f2b3e param_ops_int=d0f4936b`，已对两个新固件库存模块
+`donor/audio_pkt_dlkm.os4032.ko` 字段级复核）→ 四道验收 → 安装。
 
 ### OS4.0.0.20 → OS4.0.0.25 迁移要点（2026-08-29）
 
