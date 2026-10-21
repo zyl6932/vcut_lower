@@ -189,14 +189,27 @@ def charge_report(root):
                 print(f'   {k} = {qc[k][0]}')
         if bk.get('ffc_temp_low') and bk.get('ffc_temp_high'):
             print(f"   FFC 温度区间 {bk['ffc_temp_low'][0]}~{bk['ffc_temp_high'][0]} ℃")
-        # 双电芯供应商的机型（17 Ultra）表名带 _atl / _lwn 后缀，按 fg_master/cell_vendor 选（与 customize.sh 同一规则）
+        # 照原厂驱动的索引找表（与 customize.sh 的 pick_ffc、App 的 stockBase 同一规则）：
+        # batt_para 三元组按 cell_vendor 选总表，总表 9 个一行取覆盖 25℃ 那行的 FFC 表；查不到再按名字找
         cv = cell_vendor(root)
-        base = qc.get('ffc_para_25_35') or qc.get(f'ffc_para_25_35_{cv}')
-        if base and 'ffc_para_25_35' not in qc:
-            print(f'   电芯厂商 cell_vendor={cv} → 用 ffc_para_25_35_{cv}')
+        idx = [qc.get('batt_para', [])[i:i + 3] for i in range(0, len(qc.get('batt_para', [])) - 2, 3)]
+        total = next((t[2] for t in idx if t[1] == cv), idx[0][2] if idx else None)
+        picked = None
+        if total:
+            w = qc.get(total, [])
+            for i in range(0, len(w) - 8, 9):
+                row = w[i:i + 9]
+                if re.match(r'-?\d+$', row[0]) and re.match(r'-?\d+$', row[1]) and \
+                        int(row[0]) <= 25 < int(row[1]) and row[6] != 'null':
+                    picked = row[6]
+                    break
+        name = next((n for n in (picked, 'ffc_para_25_35', f'ffc_para_25_35_{cv}') if n and n in qc), None)
+        base = qc.get(name) if name else None
+        if name:
+            print(f'   电芯厂商 cell_vendor={cv}，总表 {total or "（无）"} → 用 {name}')
         if base:
             tab = [int(x) for x in base if re.match(r'-?\d+$', x)]
-            print('   ffc_para_25_35 = ' + ' | '.join(' '.join(map(str, tab[i:i + 3]))
+            print(f'   {name} = ' + ' | '.join(' '.join(map(str, tab[i:i + 3]))
                                                     for i in range(0, len(tab) - 2, 3)))
             n, m = ladder_of(tab)
             print(f"   → 安装时默认阶梯：拐点 {','.join(map(str, n))} mV，电流 {','.join(map(str, m))} mA")

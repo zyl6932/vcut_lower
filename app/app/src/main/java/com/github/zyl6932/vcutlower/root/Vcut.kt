@@ -267,32 +267,49 @@ object Vcut {
         )
     )
 
-    /**
-     * 原厂阶梯表（设备树 ffc_para_* / normal_para_*）：表名 → 三元组「拐点电压 拐点前电流 拐点后电流」。
-     * 设备树开机后不变，读一次即可。
-     */
-    /** 原厂表缓存：设备树开机后不变，进程里读一次就够 */
+    /** 本机原厂 FFC 表（25℃ 那一档）：表名 + 三元组「拐点电压 拐点前电流 拐点后电流」 */
+    data class Stock(val name: String, val table: List<IntArray>)
+
+    /** 原厂表缓存：设备树开机后不变，进程里读一次就够（[stockLoaded] 区分「还没读」和「本机没有」）*/
     @Volatile
-    var stockCache: Map<String, List<IntArray>>? = null
+    var stockCache: Stock? = null
+        private set
+    @Volatile
+    var stockLoaded = false
         private set
 
-    suspend fun stockTablesCached(): Map<String, List<IntArray>> =
-        stockCache ?: stockTables().also { if (it.isNotEmpty()) stockCache = it }
+    suspend fun stockCached(): Stock? =
+        if (stockLoaded) stockCache else stockBase().also { stockCache = it; stockLoaded = true }
 
-    suspend fun stockTables(): Map<String, List<IntArray>> {
+    /**
+     * 照原厂驱动的索引找表（与 customize.sh 的 pick_ffc 同一规则）。各机型表名不一样：
+     * ffc_para_25_35（17 系列）/ ffc_para_25_35_atl（17 Ultra）/ ffc_para_atl_23_35（K90 Pro Max）……
+     *   batt_para = 三元组「编号 电芯厂商 总表名」，按 fg_master/cell_vendor 选总表（没有匹配取第一家）；
+     *   总表每 9 个一行「温度下限 温度上限 - - 最大电流 普通表 FFC表 - stage表」，取覆盖 25℃ 那行的 FFC 表。
+     * 查不到再退回按名字找。
+     */
+    suspend fun stockBase(): Stock? {
         val r = RootShell.run(
-            // 双电芯供应商的机型（17 Ultra）表名带后缀 _atl / _lwn：本机电芯（fg_master/cell_vendor）的去掉后缀
-            // 当成通用名，别家的（以字母结尾）跳过；通用名本身以数字结尾，不受影响
-            "CV=${'$'}(cat $FGM/cell_vendor 2>/dev/null); " +
-                "for f in $QC/ffc_para_* $QC/normal_para_*; do [ -f \"${'$'}f\" ] || continue; n=${'$'}{f##*/}; " +
-                "case \"${'$'}n\" in *_\"${'$'}CV\") n=${'$'}{n%_${'$'}CV} ;; *[a-z]) continue ;; esac; " +
-                "echo \"${'$'}n=${'$'}(tr '\\0' ' ' < ${'$'}f)\"; done"
-        ) ?: return emptyMap()
-        return r.out.lines().mapNotNull { line ->
-            val name = line.substringBefore('=', "").ifEmpty { return@mapNotNull null }
-            val n = line.substringAfter('=').trim().split(' ').mapNotNull { it.toIntOrNull() }
-            if (n.size < 3) null else name to n.chunked(3).filter { it.size == 3 }.map { it.toIntArray() }
-        }.toMap()
+            "echo \"CV=${'$'}(cat $FGM/cell_vendor 2>/dev/null)\"; " +
+                "for f in $QC/batt_para* $QC/ffc_para_*; do [ -f \"${'$'}f\" ] && " +
+                "echo \"${'$'}{f##*/}=${'$'}(tr '\\0' ' ' < ${'$'}f)\"; done"
+        ) ?: return null
+        val props = r.out.lines().associate { it.substringBefore('=') to it.substringAfter('=', "").trim() }
+        val cv = props["CV"].orEmpty()
+        fun words(k: String) = props[k]?.split(' ')?.filter { it.isNotEmpty() }.orEmpty()
+
+        val idx = words("batt_para").chunked(3).filter { it.size == 3 }
+        val total = (idx.firstOrNull { it[1] == cv } ?: idx.firstOrNull())?.get(2)
+        val picked = total?.let { t ->
+            words(t).chunked(9).firstOrNull { row ->
+                row.size == 9 && (row[0].toIntOrNull() ?: 99) <= 25 && (row[1].toIntOrNull() ?: 0) > 25 && row[6] != "null"
+            }?.get(6)
+        }
+        val name = listOfNotNull(picked, "ffc_para_25_35", "ffc_para_25_35_$cv").firstOrNull { it in props }
+            ?: return null
+        val n = words(name).mapNotNull { it.toIntOrNull() }
+        if (n.size < 3) return null
+        return Stock(name, n.chunked(3).filter { it.size == 3 }.map { it.toIntArray() })
     }
 
     /** 原厂表在电压 v 处给的电流 */

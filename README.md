@@ -72,7 +72,9 @@ cat /sys/module/vcut_lower/parameters/t_anchors    # 0x1f = 5 个锚点全命中
 - **已验证机型**：popsicle（17 Pro Max）、pandora（17 Pro，OS4.0.0.38 诊断全过、真机跑通）、
   pudding（17，OS4.0.4.0 诊断全过、观测模式 armed=1，厂商 .ko 与 popsicle 同版本逐字节相同）、
   nezha（17 Ultra，OS4.0.4.0 诊断全过、正常模式 armed=1 跑通；原厂关机电压 2850；充电表带电芯后缀 `_atl/_lwn`，
-  按 `fg_master/cell_vendor` 选）。⚠ pudding 正常模式下电量计 `cutoff_vol` 停在 3030 没跟到 2620，待复核。
+  按 `fg_master/cell_vendor` 选）、
+  myron（REDMI K90 Pro Max，OS4.0.4.0 诊断全过、观测模式 armed=1，与 17 系列同一套驱动；原厂关机电压 3030；
+  充电表名形如 `ffc_para_atl_23_35`）。充电表一律照原厂索引找：`batt_para` 按电芯厂商选总表，取覆盖 25℃ 那行的 FFC 表。⚠ pudding 正常模式下电量计 `cutoff_vol` 停在 3030 没跟到 2620，待复核。
   `FAKE_CYCLE` 写的是已坐实偏移的结构体字段（t_cyc_ok 门控），已验证机型照常开；
   `FAKE_FG_CYCLE` 走 bq27z561 驱动写电量计，"纯 RAM"只在 popsicle 的驱动上反汇编确认过，
   其他机型新装默认 -1，待比对其 bq27z561.ko（collect.sh 已采集）后再放开。

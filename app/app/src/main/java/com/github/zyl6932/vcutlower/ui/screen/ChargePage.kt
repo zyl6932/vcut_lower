@@ -67,7 +67,7 @@ fun ChargePage(
 
     // 预读充电阶梯页要用的原厂表和换算表，点进去时直接画、不用等
     LaunchedEffect(Unit) {
-        Vcut.stockTablesCached()
+        Vcut.stockCached()
         Vcut.vsocRefresh()
     }
 

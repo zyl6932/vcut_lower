@@ -8,7 +8,8 @@ ui_print "-   降低软件关机电压 / 电量全程均匀下降"
 #   已验证机型（诊断包经 tools/analyze_diag.py 全部通过、真机跑通）正常生效：
 #     popsicle（小米 17 Pro Max）、pandora（小米 17 Pro，2026-10-21 OS4.0.0.38 验证）、
 #     pudding（小米 17，2026-10-21 OS4.0.4.0：mca_strategy_fg_comp.ko 与 popsicle 同版本逐字节相同）、
-#     nezha（小米 17 Ultra，2026-10-21 OS4.0.4.0 诊断全过、正常模式 armed=1 跑通；原厂关机电压 2850）；
+#     nezha（小米 17 Ultra，2026-10-21 OS4.0.4.0 诊断全过、正常模式 armed=1 跑通；原厂关机电压 2850）、
+#     myron（REDMI K90 Pro Max，2026-10-21 OS4.0.4.0 诊断全过、观测模式 armed=1，与 17 系列同一套驱动；原厂 3030）；
 #   其他机型只要有小米 MCA 电量驱动（目标符号在 kallsyms 里），就以【观测模式】安装：
 #   模块只读不写（enable=0），开机自动采集诊断包，发回分析后再决定能否开启。
 DEV=$(getprop ro.product.device)
@@ -45,6 +46,9 @@ case "$DEV" in
   nezha)
     MODE=full
     ui_print "- 机型: 小米 17 Ultra（已验证）→ 正常模式" ;;
+  myron)
+    MODE=full
+    ui_print "- 机型: REDMI K90 Pro Max（已验证）→ 正常模式" ;;
   *)
     MODE=probe
     ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -112,11 +116,33 @@ rm -f /dev/vcut_def.sh
 #   表是三元组「拐点电压 拐点前电流 拐点后电流」；截止(≤4495)以上的拐点不算。读不到就不配阶梯（全程 FORCE_MA）。
 # 阶梯为空也重新读：17 Ultra 第一次装 v1.9 时没找到带后缀的表，写了空阶梯又打了初始化标记
 if [ ! -f "$DATA/.ladder_init" ] || ! grep -q '^LADDER_V=[0-9]' "$CFG"; then
-  # 双电芯供应商的机型（17 Ultra）表名带电芯厂商后缀：ffc_para_25_35_atl / _lwn，按 fg_master/cell_vendor 选
+  # 表名各机型不一样（ffc_para_25_35 / ffc_para_25_35_atl / ffc_para_atl_23_35……），照原厂驱动查索引：
+  #   batt_para = 三元组「编号 电芯厂商 总表名」，按 fg_master/cell_vendor 选总表（没有匹配取第一家）；
+  #   总表每 9 个一行「温度下限 温度上限 - - 最大电流 普通表 FFC表 - stage表」，取覆盖 25℃ 那行的 FFC 表。
+  #   查不到再退回按名字找。
   QD=/proc/device-tree/soc/mca_strategy_quick_charge
   CV=$(cat /sys/devices/virtual/xm_power/fg_master/cell_vendor 2>/dev/null)
-  QC=$QD/ffc_para_25_35
+  pick_ffc() {
+    _bt=; _first=
+    set -- $(tr '\0' ' ' < "$QD/batt_para" 2>/dev/null)
+    while [ $# -ge 3 ]; do
+      [ -z "$_first" ] && _first=$3
+      [ "$2" = "$CV" ] && _bt=$3
+      shift 3
+    done
+    [ -n "$_bt" ] || _bt=$_first
+    [ -n "$_bt" ] && [ -f "$QD/$_bt" ] || return 1
+    set -- $(tr '\0' ' ' < "$QD/$_bt")
+    while [ $# -ge 9 ]; do
+      if [ "$1" -le 25 ] 2>/dev/null && [ "$2" -gt 25 ] 2>/dev/null && [ "$7" != null ]; then echo "$7"; return 0; fi
+      shift 9
+    done
+    return 1
+  }
+  QC=$QD/$(pick_ffc)
+  [ -f "$QC" ] || QC=$QD/ffc_para_25_35
   [ -f "$QC" ] || QC=$QD/ffc_para_25_35_$CV
+  ui_print "- 原厂 FFC 表：${QC##*/}"
   lv=; lm=
   if [ -f "$QC" ]; then
     set -- $(tr '\0' ' ' < "$QC")

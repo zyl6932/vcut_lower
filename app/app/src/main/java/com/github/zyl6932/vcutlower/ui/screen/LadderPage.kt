@@ -111,18 +111,18 @@ private fun LadderEditor(
     val sel = selected.coerceIn(0, ladder.ma.lastIndex)
 
     // 充电增强页已经预读进缓存（Vcut.stockCache / vsocCache），从那里进来就直接画；后台再刷新换算表
-    var tables by remember { mutableStateOf(Vcut.stockCache ?: emptyMap()) }
+    var stockT by remember { mutableStateOf(Vcut.stockCache) }
     var axis by remember { mutableStateOf(Vcut.vsocCache) }
-    var loaded by remember { mutableStateOf(Vcut.stockCache != null && Vcut.vsocLoaded) }
+    var loaded by remember { mutableStateOf(Vcut.stockLoaded && Vcut.vsocLoaded) }
     LaunchedEffect(Unit) {
-        tables = Vcut.stockTablesCached()
+        stockT = Vcut.stockCached()
         axis = Vcut.vsocRefresh()
         loaded = true
     }
     // 虚线与「按原厂值」用同一张表：原厂 FFC（25~35 ℃），也是安装时默认阶梯的来源。原来虚线跟着原厂
     // 此刻用的表走，电量 ≥95% 或温度换档时切成普通表，和按钮对不上；而阶梯只在 23~48 ℃、电量上限以下
     // 生效，要比的本来就是 FFC 表
-    val stock = tables["ffc_para_25_35"]?.let { "ffc_para_25_35" to it }
+    val stock = stockT?.let { it.name to it.table }
 
     val editable = status.root && status.installed && t.supported && status.cfg.isNotEmpty()
     // 状态、原厂表、换算表都到齐再画：原来先按空状态画一遍（1 档、截止 4460、「未打开」），
@@ -249,7 +249,8 @@ private fun stockLadder(table: List<IntArray>, cut: Int): Vcut.Ladder {
 
 /** ffc_para_25_35 → 原厂 FFC 表（25~35 ℃） */
 private fun tableName(key: String): String {
-    val m = Regex("""(ffc|normal)_para_(\d+)_(\d+)""").matchEntire(key) ?: return key
+    // 电芯厂商可在中间或末尾：ffc_para_atl_23_35 / ffc_para_25_35_atl
+    val m = Regex("""(ffc|normal)_para_(?:[a-z]+_)?(\d+)_(\d+)(?:_[a-z]+)?""").matchEntire(key) ?: return key
     val kind = if (m.groupValues[1] == "ffc") "FFC" else "普通"
     return "原厂$kind（${m.groupValues[2]}~${m.groupValues[3]} ℃）"
 }
