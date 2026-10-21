@@ -1,6 +1,6 @@
 id=vcut_lower
 name=VCut Lower
-version=v1.4-2620-os4.0.0.32
-versionCode=14000
+version=v1.8-turbo
+versionCode=18000
 author=zyl6932
-description=降低关机电压到可调值（当前 2620mV），并让电量百分比全程均匀下降。仅适用于 popsicle / 6.12.69-android16-6 / HyperOS OS4.0.0.32。
+description=降低软件关机电压、均匀电量显示，并集成充电增强（原 TurboCharge）。小米 17 Pro Max(popsicle)、17 Pro(pandora)、17(pudding) 正常生效；其他带小米 MCA 电量驱动的机型以观测模式安装（只读），自动生成诊断包供适配。

@@ -1,66 +1,146 @@
 #!/system/bin/sh
 
-ui_print "- VCut Lower v1.2-2620-os4"
-ui_print "-   关机电压 3130->2620 / 摘除 3000mV vpack 硬闸"
-ui_print "-   FCC 实时读 / 电量全程按同一 mAh 刻度均匀下降"
+ui_print "- VCut Lower v1.8"
+ui_print "-   降低软件关机电压 / 电量全程均匀下降"
 
-# ---------- 机型/内核校验：这个模块的偏移是针对特定 build 逆向出来的 ----------
+# ---------- 机型/内核校验 ----------
+# ★2026-10-21 起支持「其他机型观测模式」：
+#   已验证机型（诊断包经 tools/analyze_diag.py 全部通过、真机跑通）正常生效：
+#     popsicle（小米 17 Pro Max）、pandora（小米 17 Pro，2026-10-21 OS4.0.0.38 验证）、
+#     pudding（小米 17，2026-10-21 OS4.0.4.0：mca_strategy_fg_comp.ko 与 popsicle 同版本逐字节相同）；
+#   其他机型只要有小米 MCA 电量驱动（目标符号在 kallsyms 里），就以【观测模式】安装：
+#   模块只读不写（enable=0），开机自动采集诊断包，发回分析后再决定能否开启。
 DEV=$(getprop ro.product.device)
 KREL=$(uname -r)
+TARGET=mca_battery_shutdown_check_shutdown_delay
 
-ui_print "- 设备: $DEV"
+ui_print "- 设备: $DEV ($(getprop ro.product.model))"
 ui_print "- 内核: $KREL"
 
 [ "$ARCH" = "arm64" ] || abort "! 仅支持 arm64"
 
-if [ "$DEV" != "popsicle" ]; then
+if ! grep -qw "$TARGET" /proc/kallsyms; then
   ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  ui_print "! 本模块的 struct 偏移是针对 popsicle"
-  ui_print "! (小米17 Pro Max) 逆向得到的，"
-  ui_print "! 在其他机型上偏移几乎必然不同。"
+  ui_print "! 未找到小米 MCA 电量驱动（$TARGET）"
+  ui_print "! 本模块只能用于带该驱动的小米机型。"
   ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  abort "! 机型不匹配，已中止"
+  abort "! 机型不支持，已中止"
 fi
 
-case "$KREL" in
-  6.12.69-android16-6-*)
-    ui_print "- 内核版本匹配 (OS4.0 / 6.12.69-android16-6)" ;;
-  6.12.23-android16-5-*)
-    ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    ui_print "! 这是 OS3.0 的旧内核。本版(v1.2)只适配"
-    ui_print "! OS4.0 / 6.12.69-android16-6，偏移不同。"
-    ui_print "! 请用 v1.1 版，或先升级系统。"
-    ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    abort "! 内核版本不匹配，已中止"
-    ;;
+# FG_VERIFIED：伪装电量计循环（写 bq27z561 驱动的 fg_master/cyclecount）"纯 RAM、不碰 DF"
+#   是反汇编 17 Pro Max 的 bq27z561.ko 得出的；别的机型要比对过该驱动才算验证，否则新装默认关。
+#   （伪装 strategy 循环 FAKE_CYCLE 写的是已坐实偏移的结构体字段，且有 t_cyc_ok 门控，已验证机型照常开）
+FG_VERIFIED=0
+case "$DEV" in
+  popsicle)
+    MODE=full; FG_VERIFIED=1
+    ui_print "- 机型: 小米 17 Pro Max（已验证）→ 正常模式" ;;
+  pandora)
+    MODE=full
+    ui_print "- 机型: 小米 17 Pro（已验证）→ 正常模式" ;;
+  pudding)
+    MODE=full
+    ui_print "- 机型: 小米 17（已验证）→ 正常模式" ;;
   *)
-    ui_print "! 内核不是 6.12.69-android16-6-*"
-    ui_print "! 符号 CRC 与 struct 偏移很可能都对不上"
-    ui_print "! 装上后 insmod 会失败，或指令指纹校验拒绝加载"
-    ui_print "! （这是安全的失败：模块不会被加载，不会写内核内存）"
-    ;;
+    MODE=probe
+    ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    ui_print "! 机型 $DEV 未经验证 → 安装为【观测模式】"
+    ui_print "!   只读不写，不改关机电压，不接管电量显示"
+    ui_print "!   开机约 3 分钟后自动生成诊断包："
+    ui_print "!   /sdcard/Download/vcut_diag_*.tar.gz"
+    ui_print "!   请把它发回给开发者分析。"
+    ui_print "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" ;;
 esac
 
-lsmod | grep -q '^mca_strategy_fg_comp' || abort "! 未找到 mca_strategy_fg_comp 模块"
+case "$KREL" in
+  6.12.*-android16-*)
+    ui_print "- 内核系列匹配 (android16-6.12)" ;;
+  *)
+    ui_print "! 内核不是 android16-6.12 系列，模块大概率加载失败"
+    ui_print "! （安全失败：不会加载、不写内核内存；诊断包照常生成）"
+    ;;
+esac
 
 # ---------- 配置文件放 /data，模块升级不覆盖 ----------
 DATA=/data/adb/vcut_lower
 mkdir -p "$DATA"
+# 默认配置下面会被移走或删掉，充电增强补节要用，先留一份
+cp "$MODPATH/config.sh.default" /dev/vcut_def.sh
 if [ -f "$DATA/config.sh" ]; then
   ui_print "- 保留已有配置 $DATA/config.sh"
   rm -f "$MODPATH/config.sh.default"
 else
   mv "$MODPATH/config.sh.default" "$DATA/config.sh"
+  if [ "$FG_VERIFIED" != "1" ]; then
+    sed -i 's/^FAKE_FG_CYCLE=[^ #]*/FAKE_FG_CYCLE=-1/' "$DATA/config.sh"
+  fi
   ui_print "- 已写入默认配置 $DATA/config.sh"
 fi
+# 模式单独存放：机型决定，不随 config.sh 保留（换机/刷机后重新判定）
+echo "MODE=$MODE" > "$DATA/mode.sh"
 echo 0 > "$DATA/bootfail"
+
+# ---------- 充电增强（TurboCharge 并入，2026-10-21）----------
+CFG="$DATA/config.sh"
+set_cfg() {
+  if grep -q "^$1=" "$CFG"; then sed -i "s/^$1=[^ #]*/$1=$2/" "$CFG"; else echo "$1=$2" >> "$CFG"; fi
+}
+# 只在第一次装带充电增强的版本时初始化；之后升级不动用户自己的选择
+if [ ! -f "$DATA/.turbo_init" ]; then
+  # 老配置没有这一节：从默认配置整节补上
+  grep -q '^ENABLE_FORCE=' "$CFG" || sed -n '/^# ============ 充电增强/,$p' /dev/vcut_def.sh >> "$CFG"
+  # 节点与护栏只在 17 Pro Max 上验证过：其他机型默认关，用户自己在 App 里开
+  if [ "$DEV" != "popsicle" ]; then
+    set_cfg ENABLE_THERMAL_REMOVE 0
+    set_cfg ENABLE_FORCE 0
+  fi
+  touch "$DATA/.turbo_init"
+fi
+rm -f /dev/vcut_def.sh
+
+# 旧 turbo_charge 模块：迁移配置、停掉守护进程、禁用，避免两个守护进程抢同一组节点
+OLD_TC=/data/adb/modules/turbo_charge
+if [ -d "$OLD_TC" ] && [ ! -f "$OLD_TC/disable" ]; then
+  if [ -f /data/adb/turbo_charge/config.sh ]; then
+    for k in ENABLE_THERMAL_REMOVE ENABLE_FORCE FORCE_MA MAX_SOC MAX_VBAT MAX_BTEMP MAX_CTHERM MAX_CONN \
+             HYST_SOC HYST_VBAT HYST_BTEMP HYST_CTHERM HYST_CONN; do
+      v=$(sed -n "s/^$k=\([^ #]*\).*/\1/p" /data/adb/turbo_charge/config.sh | head -1)
+      [ -n "$v" ] && set_cfg "$k" "$v"
+    done
+    ui_print "- 已迁移 TurboCharge 的配置（护栏数值保持你原来的设置）"
+  fi
+  # 旧守护进程收到 TERM 会先撤回 A/B（它的 trap 里 all_off），再退出
+  pkill -f "$OLD_TC/turbo_charge.sh" 2>/dev/null
+  touch "$OLD_TC/disable"
+  ui_print "- 已禁用旧的 TurboCharge 模块（充电增强已并入本模块，重启后生效）"
+fi
 
 set_perm "$MODPATH/service.sh"   0 0 0755
 set_perm "$MODPATH/action.sh"    0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
+set_perm "$MODPATH/autooff.sh"   0 0 0755
+set_perm "$MODPATH/collect.sh"   0 0 0755
+set_perm "$MODPATH/vcut_turbo.sh" 0 0 0755
 set_perm "$MODPATH/vcut_lower.ko" 0 0 0644
 set_perm "$MODPATH/module.prop"  0 0 0644
 set_perm_recursive "$DATA" 0 0 0700 0600
+
+# ---------- 配套 App ----------
+# pm（system_server）读不到 modules_update 目录，先复制到 /data/local/tmp 再装
+if [ -f "$MODPATH/vcutlower.apk" ]; then
+  cp "$MODPATH/vcutlower.apk" /data/local/tmp/vcutlower.apk
+  chmod 0644 /data/local/tmp/vcutlower.apk
+  if pm install -r /data/local/tmp/vcutlower.apk >/dev/null 2>&1; then
+    ui_print "- 已安装配套 App「VCut Lower」"
+    ui_print "-   首次打开前请在 KernelSU → 超级用户 中允许它"
+    rm -f "$MODPATH/vcutlower.apk"
+  else
+    ui_print "! 配套 App 自动安装失败，可手动安装："
+    ui_print "!   /data/adb/modules/vcut_lower/vcutlower.apk"
+    set_perm "$MODPATH/vcutlower.apk" 0 0 0644
+  fi
+  rm -f /data/local/tmp/vcutlower.apk
+fi
 
 ui_print " "
 ui_print "- 安装完成，重启后生效"

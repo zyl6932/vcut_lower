@@ -21,6 +21,42 @@ cat /sys/module/vcut_lower/parameters/t_anchors    # 0x1f = 5 个锚点全命中
 只有在**符号 CRC 变了**（GKI 内核换了）或**解析失败且指纹不符**时才需要回电脑重编，
 详见下面「系统更新后怎么办」。
 
+### v1.6（2026-10-21）：其他机型观测模式
+
+- `customize.sh`：kallsyms 里有 `mca_battery_shutdown_check_shutdown_delay` 即允许安装；
+  已验证机型写 `MODE=full`，其他机型写 `MODE=probe`（`/data/adb/vcut_lower/mode.sh`）。
+- **已验证机型**：popsicle（17 Pro Max）、pandora（17 Pro，OS4.0.0.38 诊断全过、真机跑通）、
+  pudding（17，OS4.0.4.0 诊断全过、观测模式 armed=1，厂商 .ko 与 popsicle 同版本逐字节相同）。
+  `FAKE_CYCLE` 写的是已坐实偏移的结构体字段（t_cyc_ok 门控），已验证机型照常开；
+  `FAKE_FG_CYCLE` 走 bq27z561 驱动写电量计，"纯 RAM"只在 popsicle 的驱动上反汇编确认过，
+  其他机型新装默认 -1，待比对其 bq27z561.ko（collect.sh 已采集）后再放开。
+  新增机型：诊断包 analyze_diag 通过 + 对方正常模式跑通后，在 customize.sh 的 case 里加一行。
+- 观测模式：`enable=0 soc_ctl=0 kill_vpack_gate=0 fake_cycle=-1`，模块全程只读，
+  卸载也不写回（`t_wrote=0`）；每个系统版本开机后自动跑一次 `collect.sh`，
+  诊断包在 `/sdcard/Download/vcut_diag_*.tar.gz`。KSU「执行」按钮也可手动采集。
+- 分析：`python tools/analyze_diag.py <包>` → CRC（9 个导入符号逐个对原厂模块）、
+  离线锚点、字段对账、运行结果、结论。确认可用后让对方在 `config.sh` 加 `MODE=full` 并定电压。
+- 只支持 android16-6.12 内核；CRC 只差 module_layout/param_ops_int 时可 patch 出机型专用 .ko，
+  其余符号也不同 = 内核换代，需该内核树重编。
+
+### v1.5（2026-10-21）：只读字段也能自愈 —— `autooff.sh`
+
+锚点只覆盖 5 个字段，其余 8 个只读字段（current/cycle/temp/rm/fcc/raw_soc/soc/design）
+原先吃全局 delta，遇到 §89 那种非均匀位移就 armed=0。现在 `service.sh` 在 insmod 前跑
+`autooff.sh`：tracefs 只读 dump 结构体 0x9c0..0xac0，逐字段在基线 -0x20..+0x40 窗口里
+对 sysfs 真值，**唯一命中**才以 `ovr_*` 参数传给模块，坐实结果还要满足原有先后顺序。
+对不上的字段沿用 delta，validate 仍是最后一道关（新增 raw_soc≈rm/fcc 交叉校验、current/temp 区间）。
+
+```
+cat /sys/module/vcut_lower/parameters/t_ovr     # 坐实位图 bit0..7 = current cycle temp rm fcc raw_soc soc design
+cat /sys/module/vcut_lower/parameters/t_cyc_ok  # 1 = cycle 偏移有硬证据，才会写 fake_cycle
+grep autooff /data/adb/vcut_lower/boot.log      # 每个字段的对账过程
+```
+
+★顺带修了一个安全漏洞：`fake_cycle` 往无锚点、无校验的 `OFF_CYCLE` 写值。现在只有
+cycle 偏移被 sysfs 坐实（`t_ovr` bit1）或指纹通过时才写（`t_cyc_ok=1`）。
+`autooff.sh` 里的基线必须与 `vcut_lower.c` 的 `BASE_*` 同步。
+
 ---
 
 ### OS4.0.0.25 → OS4.0.0.32 迁移要点（2026-09-04）

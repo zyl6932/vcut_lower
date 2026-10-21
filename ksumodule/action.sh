@@ -5,6 +5,18 @@ SFG=/sys/devices/platform/soc/soc:strategy-fg
 BAT=/sys/class/power_supply/battery
 FGM=/sys/devices/virtual/xm_power/fg_master
 DATA=/data/adb/vcut_lower
+MODE=full
+[ -f "$DATA/mode.sh" ] && . "$DATA/mode.sh"
+[ -f "$DATA/config.sh" ] && eval "$(grep '^MODE=' "$DATA/config.sh")"
+
+# 观测模式（未验证机型）：「执行」按钮 = 立即生成一份诊断包
+if [ "$MODE" != "full" ]; then
+  echo "=========== VCut Lower 观测模式 ==========="
+  echo "机型 $(getprop ro.product.device) 未经验证，模块只读不写。"
+  echo "正在生成诊断包，请保持亮屏 1~2 分钟..."
+  sh "${0%/*}/collect.sh"
+  exit 0
+fi
 
 echo "=========== VCut Lower 状态 ==========="
 if lsmod | grep -q '^vcut_lower'; then

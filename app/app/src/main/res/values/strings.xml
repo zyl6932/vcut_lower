@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">VCut Lower</string>
+    <!-- 以下原样取自 HyperMusicCover -->
+    <string name="about">关于</string>
+    <string name="about_telegram">Telegram群组</string>
+    <string name="about_telegram_summary">https://t.me/HyperMusicCover</string>
+    <string name="about_qq_group">QQ群组</string>
+    <string name="about_qq_group_summary">https://qm.qq.com/q/RcLbYXgBy2</string>
+    <string name="settings_interface">界面</string>
+    <string name="settings_theme">主题</string>
+    <string name="settings_theme_summary">主题模式、导航栏样式与背景模糊</string>
+    <string name="theme_mode">主题模式</string>
+    <string name="theme_system">跟随系统</string>
+    <string name="theme_light">浅色</string>
+    <string name="theme_dark">深色</string>
+    <string name="theme_monet_system">Monet 跟随系统</string>
+    <string name="theme_monet_light">Monet 浅色</string>
+    <string name="theme_monet_dark">Monet 深色</string>
+    <string name="floating_navbar">悬浮导航栏</string>
+    <string name="floating_navbar_summary">使用悬浮样式的底部导航栏</string>
+    <string name="liquid_glass">液态玻璃效果</string>
+    <string name="liquid_glass_summary">iOS 风格的液态玻璃模糊效果</string>
+    <string name="blur_enabled">背景模糊</string>
+    <string name="blur_enabled_summary">启用导航栏和底栏的背景模糊效果</string>
+</resources>

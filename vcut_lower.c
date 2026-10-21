@@ -168,6 +168,29 @@ module_param(t_off_src, int, 0444);
 module_param(t_anchors, int, 0444);
 module_param(t_scan_insns, int, 0444);
 
+/*
+ * ★2026-10-21：只读字段的【外部坐实偏移】（由 service.sh 的 autooff.sh 传入）。
+ *   current/cycle/temp/rm/fcc/raw_soc/soc/design 在目标函数里没有语义锚点，
+ *   原先只能吃全局 delta —— 一遇非均匀位移（§89）就错位。autooff.sh 在 insmod 前
+ *   用 tracefs 只读 dump 结构体、逐字对 sysfs 真值，【唯一命中】的字段才传进来。
+ *   -1 = 未坐实，沿用 delta 推导。写字段（vcut 簇/gate/fake_soc）仍只认锚点，不受此影响。
+ */
+static int ovr_current = -1, ovr_cycle = -1, ovr_temp = -1, ovr_rm = -1;
+static int ovr_fcc = -1, ovr_raw_soc = -1, ovr_soc = -1, ovr_design = -1;
+static int t_ovr;		/* 生效的覆盖位图: bit0=current bit1=cycle bit2=temp bit3=rm
+				 * bit4=fcc bit5=raw_soc bit6=soc bit7=design */
+static int t_cyc_ok;		/* 1=cycle 偏移有硬证据（坐实或指纹通过），才允许写 fake_cycle */
+module_param(ovr_current, int, 0444);
+module_param(ovr_cycle, int, 0444);
+module_param(ovr_temp, int, 0444);
+module_param(ovr_rm, int, 0444);
+module_param(ovr_fcc, int, 0444);
+module_param(ovr_raw_soc, int, 0444);
+module_param(ovr_soc, int, 0444);
+module_param(ovr_design, int, 0444);
+module_param(t_ovr, int, 0444);
+module_param(t_cyc_ok, int, 0444);
+
 module_param(t_mean_volt, int, 0444);
 module_param(t_current, int, 0444);
 module_param(t_vpack, int, 0444);
@@ -187,7 +210,11 @@ module_param(armed, int, 0444);
 static void *saved_struct;
 static u8    saved_vpack_en;
 static s32   saved_fw, saved_delay, saved_sw;
+/* 只读导出原厂电压闸（首次命中通过校验时的快照，0 = 尚未命中）：App 据此估算解锁容量 */
+module_param_named(t_orig_delay, saved_delay, int, 0444);
 static int   saved_valid;
+static int   t_wrote;	/* 1=确实改写过 vcutoff/gate；enable=0 的观测模式下保持 0，卸载时也不写回 */
+module_param(t_wrote, int, 0444);
 
 static int restore_on_exit = 1;
 module_param(restore_on_exit, int, 0644);
@@ -456,6 +483,17 @@ static int validate(void *s)
 	 *     -1（原生未接管）/ 0..100（我们或驱动写的百分比）
 	 */
 	s32 fsoc = rd32(s, OFF_FAKE_SOC);
+	/*
+	 * ★2026-10-21 补：raw_soc/current/temp/cycle 原先完全不在校验里。
+	 *   raw_soc 直接决定显示、current 决定 IR 补偿与单调方向，错了要拒绝 arm；
+	 *   raw_soc 还能和 rm/fcc 交叉验证（它就是 rm/fcc×10000），这是硬约束。
+	 *   cycle 只影响伪装循环这一项，区间不对只关掉该功能（t_cyc_ok=0），不拖累主功能。
+	 */
+	s32 raw = rd32(s, OFF_RAW_SOC);
+	s32 cur = rd32(s, OFF_CURRENT);
+	s32 tmp = rd32(s, OFF_TEMP);
+	s32 cyc = rd32(s, OFF_CYCLE);
+	s64 raw_calc;
 
 	if (fw < 2400 || fw > 3600) goto bad;
 	if (dl < 2400 || dl > 3600) goto bad;
@@ -470,6 +508,16 @@ static int validate(void *s)
 	if (fccu < 1000000 || fccu > dsgu)     goto bad;
 	if (rmu  < 0       || rmu  > fccu + 500000) goto bad;
 	if (fsoc < -1 || fsoc > 100) goto bad;  /* ★见上方说明 */
+	if (raw < 0 || raw > 10000) goto bad;
+	raw_calc = (s64)rmu * 10000 / fccu;     /* fccu 已保证 ≥ 1000000 */
+	if (raw_calc > 10000) raw_calc = 10000; /* 满充时 rm 可略超 fcc，raw 封顶 */
+	if (raw - raw_calc > 500 || raw_calc - raw > 500) goto bad;  /* 5% 容差 */
+	if (cur < -20000000 || cur > 20000000) goto bad;   /* ±20A，单位 µA */
+	if (tmp < -400 || tmp > 900) goto bad;             /* -40~90°C，单位 0.1°C */
+	if (cyc < 0 || cyc > 5000) {
+		t_cyc_ok = 0;
+		pr_warn("vcut_lower: cycle@0x%x=%d 不在 0..5000，关闭伪装循环\n", OFF_CYCLE, cyc);
+	}
 
 	pr_info("vcut_lower: 校验通过 fw=%d delay=%d sw=%d mean=%dmV vpack=%dmV soc=%d vpack_gate=%u "
 		"rm=%dmAh fcc=%dmAh design=%dmAh fake_soc=%d (偏移源=%s delta=%+d)\n",
@@ -478,8 +526,9 @@ static int validate(void *s)
 	return 1;
 bad:
 	pr_err("vcut_lower: ★校验失败，偏移可能不对，永久禁写！"
-	       " fw=%d delay=%d sw=%d mean=%d vpack=%d soc=%d vpen=%u rm=%d fcc=%d design=%d fake_soc=%d\n",
-	       fw, dl, sw, mv, vp, soc, vpen, rmu, fccu, dsgu, fsoc);
+	       " fw=%d delay=%d sw=%d mean=%d vpack=%d soc=%d vpen=%u rm=%d fcc=%d design=%d fake_soc=%d"
+	       " raw_soc=%d cur=%d temp=%d cycle=%d\n",
+	       fw, dl, sw, mv, vp, soc, vpen, rmu, fccu, dsgu, fsoc, raw, cur, tmp, cyc);
 	return 0;
 }
 
@@ -587,6 +636,7 @@ static int vcut_pre(struct kprobe *p, struct pt_regs *regs)
 	if (dl > fw) dl = fw;
 	if (sw > dl) sw = dl;
 
+	t_wrote = 1;
 	wr32(s, OFF_VCUT_FW,    fw);
 	wr32(s, OFF_VCUT_DELAY, dl);
 	wr32(s, OFF_VCUT_SW,    sw);
@@ -595,8 +645,9 @@ static int vcut_pre(struct kprobe *p, struct pt_regs *regs)
 		*(volatile u8 *)((char *)s + OFF_VPACK_LOW_EN) = 0;
 
 	/* ============ 伪装循环次数（仅 strategy RAM，不碰电量计）============ */
+	/* ★cycle 没有锚点：偏移没有硬证据（t_cyc_ok=0）时绝不写，否则就是往无关字段写值 */
 	t_cycle = rd32(s, OFF_CYCLE);
-	if (fake_cycle >= 0 && t_cycle != fake_cycle) {
+	if (fake_cycle >= 0 && t_cyc_ok && t_cycle != fake_cycle) {
 		wr32(s, OFF_CYCLE, fake_cycle);
 		t_cycle = fake_cycle;
 	}
@@ -982,7 +1033,9 @@ static int resolve_offsets(void *fn)
 		 *     0.0.32 0xa98/0xa9c/0xaa0/0xaa4 全部吻合）。
 		 *   这 4 个恰恰是本模块会【主动写】的字段，用锚点 delay 直接钉死，
 		 *   比吃全局 delta 稳得多——只要 delay 锚点命中就一定对。
-		 *   （current/cycle/temp/rm/fcc/raw_soc/soc/design 仍走 delta，它们只读，
+		 *   （current/cycle/temp/rm/fcc/raw_soc/soc/design 先走 delta，随后由
+		 *    apply_overrides() 用 autooff.sh 坐实的 ovr_* 覆盖；cycle 会被写，另由 t_cyc_ok 门控。
+		 *    以下为原注释：它们只读，
 		 *    且都在 validate 的核对范围内，错了会被 armed=0 兜住。）*/
 		if (delay >= 0) {
 			OFF_VCUT_FW     = delay - 4;
@@ -1044,20 +1097,59 @@ static int check_insn_sig(void)
 		u32 got = *(const volatile u32 *)((const char *)base + sigs[i].off);
 
 		if (got != sigs[i].expect) {
-			pr_err("vcut_lower: ★指令指纹不符 +0x%03x 实际=0x%08x 期望=0x%08x (%s)\n",
+			pr_warn("vcut_lower: 指令指纹不符 +0x%03x 实际=0x%08x 期望=0x%08x (%s)\n",
 			       sigs[i].off, got, sigs[i].expect, sigs[i].desc);
 			bad++;
 		}
 	}
 	if (bad) {
-		pr_err("vcut_lower: ★%d/%d 条指纹不符 —— 目标模块的 struct 偏移与本模块假设不一致，"
-		       "拒绝加载（本模块只适配 popsicle 的特定 vendor 模块 build）\n",
-		       bad, (int)ARRAY_SIZE(sigs));
+		pr_warn("vcut_lower: %d/%d 条指纹不符 —— vendor 模块不是编译期基线 build；"
+			"自解析成功则以自解析为准，两者都失败才拒绝加载\n",
+			bad, (int)ARRAY_SIZE(sigs));
 		return 0;
 	}
 	pr_info("vcut_lower: 指令指纹校验通过（%d 条），偏移 0x9fc/0xa9c/0xaa9 与代码一致\n",
 		(int)ARRAY_SIZE(sigs));
 	return 1;
+}
+
+/*
+ * 应用 autooff.sh 坐实的只读字段偏移（见 ovr_* 声明处）。
+ * 只做形式检查（4 字节对齐、落在结构体已知区域内）；数值是否合理由 validate() 复核。
+ */
+static void apply_overrides(void)
+{
+	static const struct {
+		int *ovr, *off, bit;
+		const char *name;
+	} t[] = {
+		{ &ovr_current, &OFF_CURRENT,    0, "current" },
+		{ &ovr_cycle,   &OFF_CYCLE,      1, "cycle"   },
+		{ &ovr_temp,    &OFF_TEMP,       2, "temp"    },
+		{ &ovr_rm,      &OFF_RM_UAH,     3, "rm"      },
+		{ &ovr_fcc,     &OFF_FCC_UAH,    4, "fcc"     },
+		{ &ovr_raw_soc, &OFF_RAW_SOC,    5, "raw_soc" },
+		{ &ovr_soc,     &OFF_SOC,        6, "soc"     },
+		{ &ovr_design,  &OFF_DESIGN_UAH, 7, "design"  },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(t); i++) {
+		int v = *t[i].ovr;
+
+		if (v < 0)
+			continue;
+		if ((v & 3) || v < 0x400 || v > 0x1000) {
+			pr_err("vcut_lower: ovr_%s=0x%x 不合法（需 4 字节对齐且在 0x400..0x1000），忽略\n",
+			       t[i].name, v);
+			continue;
+		}
+		if (*t[i].off != v)
+			pr_info("vcut_lower: ovr_%s: 0x%x -> 0x%x（sysfs 坐实）\n",
+				t[i].name, *t[i].off, v);
+		*t[i].off = v;
+		t_ovr |= 1 << t[i].bit;
+	}
 }
 
 static int __init vcut_init(void)
@@ -1102,6 +1194,13 @@ static int __init vcut_init(void)
 	}
 	if (!sig_ok && !t_resolved)
 		pr_err("vcut_lower: ★force=1，指纹不符且自解析失败仍继续 —— 风险自负\n");
+
+	apply_overrides();
+	/* cycle 是唯一会被写的无锚点字段：要么 sysfs 坐实，要么指纹证明仍是基线 build */
+	t_cyc_ok = (t_ovr & 2) || sig_ok;
+	if (fake_cycle >= 0 && !t_cyc_ok)
+		pr_warn("vcut_lower: cycle 偏移 0x%x 无硬证据（未坐实且指纹不符），本次不写 fake_cycle\n",
+			OFF_CYCLE);
 
 	/*
 	 * ★fg 循环数 kretprobe：失败【不】中止加载 ——
@@ -1150,20 +1249,29 @@ static void __exit vcut_exit(void)
 		if (rd32(saved_struct, OFF_FAKE_SOC) != -1)
 			wr32(saved_struct, OFF_FAKE_SOC, -1);
 
+		/* ★2026-10-21：从没写过（观测模式）就什么都不写回 —— 写回的"原值"
+		 *   是首次命中时的快照，期间驱动若自己更新过，写回反而是改写 */
+		if (!t_wrote) {
+			pr_info("vcut_lower: 已卸载，命中 %d 次（观测模式，未改写任何值）\n", t_hits);
+			return;
+		}
 		*(volatile u8 *)((char *)saved_struct + OFF_VPACK_LOW_EN) = saved_vpack_en;
 		if (restore_on_exit) {
 			wr32(saved_struct, OFF_VCUT_FW,    saved_fw);
 			wr32(saved_struct, OFF_VCUT_DELAY, saved_delay);
 			wr32(saved_struct, OFF_VCUT_SW,    saved_sw);
-			if (fake_cycle >= 0)
+			if (fake_cycle >= 0 && t_cyc_ok)
 				wr32(saved_struct, OFF_CYCLE, saved_cycle);
 			pr_info("vcut_lower: 已卸载，命中 %d 次；已写回 fw/delay/sw = %d/%d/%d，cycle = %d，vpack_gate = %u\n",
 				t_hits, saved_fw, saved_delay, saved_sw, saved_cycle, saved_vpack_en);
 			return;
 		}
 	}
-	pr_info("vcut_lower: 已卸载，命中 %d 次，vpack_gate 还原为 %u（未写回 vcutoff）\n",
-		t_hits, saved_vpack_en);
+	if (!saved_valid)
+		pr_info("vcut_lower: 已卸载，命中 %d 次（从未通过校验，未改写任何值）\n", t_hits);
+	else
+		pr_info("vcut_lower: 已卸载，命中 %d 次，vpack_gate 还原为 %u（未写回 vcutoff）\n",
+			t_hits, saved_vpack_en);
 }
 
 module_init(vcut_init);

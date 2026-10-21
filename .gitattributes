@@ -1,0 +1,4 @@
+*.sh text eol=lf
+ksumodule/** text eol=lf
+ksumodule/*.ko binary
+*.ko binary

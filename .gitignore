@@ -37,3 +37,11 @@ venv/
 .DS_Store
 desktop.ini
 Thumbs.db
+
+# ---- Android 配套 App ----
+app/.gradle/
+app/build/
+app/app/build/
+app/local.properties
+app/keystore.properties
+app/.kotlin/
