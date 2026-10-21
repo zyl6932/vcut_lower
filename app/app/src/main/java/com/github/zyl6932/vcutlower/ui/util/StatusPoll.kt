@@ -25,8 +25,9 @@ class StatusHolder(val status: Vcut.Status, val checked: Boolean, val refresh: (
  */
 @Composable
 fun rememberVcutStatus(): StatusHolder {
-    var status by remember { mutableStateOf(Vcut.Status()) }
-    var checked by remember { mutableStateOf(false) }
+    // 进程里已经读过就先用上次的状态，新开的页面不必从空状态等第一次读完
+    var status by remember { mutableStateOf(Vcut.last ?: Vcut.Status()) }
+    var checked by remember { mutableStateOf(Vcut.last != null) }
     val scope = rememberCoroutineScope()
 
     val lifecycle = LocalLifecycleOwner.current.lifecycle

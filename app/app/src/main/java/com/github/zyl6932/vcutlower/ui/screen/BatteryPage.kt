@@ -1,6 +1,5 @@
 package com.github.zyl6932.vcutlower.ui.screen
 
-import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.github.zyl6932.vcutlower.root.Vcut
+import com.github.zyl6932.vcutlower.ui.util.FoldUnder
 import com.github.zyl6932.vcutlower.ui.util.PageScaffold
 import com.github.zyl6932.vcutlower.ui.util.ValueSlider
 import com.github.zyl6932.vcutlower.ui.util.nextCard
@@ -66,10 +66,7 @@ fun BatteryPage(
     // 正在执行的操作（如抬高满充电压要断充约 11 秒），期间整页不可操作
     var busy by remember { mutableStateOf<String?>(null) }
     var pending by remember { mutableStateOf<Pending?>(null) }
-    // 电量计接口只在 17 Pro Max 的 bq27z561 驱动上逆向确认过"纯 RAM"
-    val fgVerified = Build.DEVICE == "popsicle"
     val enabled = a.editable && busy == null
-    val voltageEnabled = enabled && a.full
 
     fun run(label: String, op: suspend () -> Boolean) {
         busy = label
@@ -102,8 +99,7 @@ fun BatteryPage(
                 ) {
                     WindowDropdownPreference(
                         title = "运行模式",
-                        summary = notice ?: if (a.full) "正常：按下面的设置降低关机电压"
-                        else "观测：只读不写，关机电压保持原厂",
+                        summary = notice ?: if (a.full) null else "观测：只读不写，关机电压保持原厂",
                         items = listOf("正常", "观测"),
                         selectedIndex = if (a.full) 0 else 1,
                         enabled = enabled,
@@ -119,95 +115,99 @@ fun BatteryPage(
                     )
                 }
 
-                SmallTitle(text = "关机电压")
-                Card(
-                    modifier = Modifier.nextCard()
-                ) {
-                    val delay = dragging ?: a.delay
-                    val presetIndex = PRESETS.indexOfFirst { it.second == a.delay }
-                        .let { if (it < 0) PRESETS.size else it }
-                    WindowDropdownPreference(
-                        title = "预设",
-                        summary = if (a.full) "电池老化明显时请用保守档" else "观测模式下关机电压保持原厂",
-                        items = PRESETS.map { "${it.first} ${it.second} mV" } + "自定义",
-                        selectedIndex = presetIndex,
-                        enabled = voltageEnabled,
-                        onSelectedIndexChange = { i ->
-                            if (i < PRESETS.size) run("正在应用…") { Vcut.setVoltage(PRESETS[i].second) }
-                        },
-                    )
-                    ValueSlider(
-                        title = "关机电压闸",
-                        summary = "均值电压 ≤ 此值即关机，判空阈值 ${(delay - 100).coerceAtLeast(Vcut.FLOOR)} mV",
-                        value = delay.toFloat(),
-                        valueRange = Vcut.FLOOR.toFloat()..Vcut.CEIL.toFloat(),
-                        enabled = voltageEnabled,
-                        detent = 3000f,
-                        label = { "${it.roundToInt()} mV" },
-                        onValueChange = { dragging = (it / 10f).roundToInt() * 10 },
-                        onValueChangeFinished = {
-                            val v = dragging
-                            dragging = null
-                            if (v != null && v != a.delay) run("正在应用…") { Vcut.setVoltage(v) }
-                        },
-                    )
-                }
+                // 观测模式下 service.sh 加载时把下面全部强制关掉（ENABLE=0、SOC_CTL=0、两种伪装循环 -1），
+                // 这些设置都不起作用，照 HyperMusicCover 的总开关收起来（FoldUnder），而不是留着能拨。
+                // 「抬高满充电压」原来在观测模式下还能打开，而它是 App 直接写电量计、真会生效的。
+                FoldUnder(a.full, settled = status.root) {
+                    Column {
+                        SmallTitle(text = "关机电压")
+                        Card(
+                            modifier = Modifier.nextCard()
+                        ) {
+                            val delay = dragging ?: a.delay
+                            val presetIndex = PRESETS.indexOfFirst { it.second == a.delay }
+                                .let { if (it < 0) PRESETS.size else it }
+                            WindowDropdownPreference(
+                                title = "预设",
+                                summary = "电池老化明显时请用保守档",
+                                items = PRESETS.map { "${it.first} ${it.second} mV" } + "自定义",
+                                selectedIndex = presetIndex,
+                                enabled = enabled,
+                                onSelectedIndexChange = { i ->
+                                    if (i < PRESETS.size) run("正在应用…") { Vcut.setVoltage(PRESETS[i].second) }
+                                },
+                            )
+                            ValueSlider(
+                                title = "关机电压闸",
+                                summary = "均值电压 ≤ 此值即关机",
+                                value = delay.toFloat(),
+                                valueRange = Vcut.FLOOR.toFloat()..Vcut.CEIL.toFloat(),
+                                enabled = enabled,
+                                detent = 3000f,
+                                label = { "${it.roundToInt()} mV" },
+                                onValueChange = { dragging = (it / 10f).roundToInt() * 10 },
+                                onValueChangeFinished = {
+                                    val v = dragging
+                                    dragging = null
+                                    if (v != null && v != a.delay) run("正在应用…") { Vcut.setVoltage(v) }
+                                },
+                            )
+                        }
 
-                SmallTitle(text = "功能")
-                Card(
-                    modifier = Modifier.nextCard()
-                ) {
-                    SwitchPreference(
-                        title = "接管电量显示",
-                        summary = "百分比按同一 mAh 刻度均匀下降，到截止附近才交还关机",
-                        checked = a.socCtl,
-                        enabled = enabled,
-                        onCheckedChange = { on -> run("正在应用…") { Vcut.setSocCtl(on) } },
-                    )
-                    SwitchPreference(
-                        title = "伪装循环次数",
-                        summary = if (a.fakeCyclePaused) "已暂停：本次开机循环偏移未确认，重启后恢复"
-                        else "只改 strategy 内存，不碰电量计固件",
-                        checked = a.fakeCycle,
-                        enabled = enabled,
-                        onCheckedChange = { on ->
-                            pending = when {
-                                // 参数已开、只是偏移没确认：再写参数没用，要重启重新确认
-                                on && a.fakeCyclePaused -> Pending(
-                                    title = "恢复伪装循环次数",
-                                    summary = "本次开机没能确认循环次数在结构体里的位置，为安全起见没有写入。重启手机后会重新确认。",
-                                    action = "重启",
-                                    run = { Vcut.applyWithReboot(mapOf("FAKE_CYCLE" to "1")) },
-                                )
-                                on -> null.also { run("正在应用…") { Vcut.enableFakeCycle() } }
-                                else -> Pending(
-                                    title = "关闭伪装循环次数",
-                                    summary = "要重新加载模块才能把循环次数写回真实值，约需 30~90 秒，期间关机电压暂时恢复原厂。",
-                                    action = "重新加载",
-                                    run = { Vcut.applyWithReload(mapOf("FAKE_CYCLE" to "-1")) },
-                                )
-                            }
-                        },
-                    )
-                    SwitchPreference(
-                        title = "抬高满充电压",
-                        summary = if (fgVerified) "抬回被老化策略压低的满充电压"
-                        else "写电量计接口，仅在小米 17 Pro Max 上验证过",
-                        checked = a.fakeFg,
-                        enabled = enabled,
-                        onCheckedChange = { on ->
-                            if (on) {
-                                run("正在应用，会短暂断开充电约 11 秒…") { Vcut.enableFakeFg() }
-                            } else {
-                                pending = Pending(
-                                    title = "关闭抬高满充电压",
-                                    summary = "电量计里的伪装循环数只有重启才能清除，需要立即重启手机。",
-                                    action = "重启",
-                                    run = { Vcut.applyWithReboot(mapOf("FAKE_FG_CYCLE" to "-1")) },
-                                )
-                            }
-                        },
-                    )
+                        SmallTitle(text = "功能")
+                        Card(
+                            modifier = Modifier.nextCard()
+                        ) {
+                            SwitchPreference(
+                                title = "接管电量显示",
+                                checked = a.socCtl,
+                                enabled = enabled,
+                                onCheckedChange = { on -> run("正在应用…") { Vcut.setSocCtl(on) } },
+                            )
+                            SwitchPreference(
+                                title = "伪装循环次数",
+                                summary = if (a.fakeCyclePaused) "已暂停：本次开机循环偏移未确认，重启后恢复"
+                                else "只改 strategy 内存，不碰电量计固件",
+                                checked = a.fakeCycle,
+                                enabled = enabled,
+                                onCheckedChange = { on ->
+                                    pending = when {
+                                        // 参数已开、只是偏移没确认：再写参数没用，要重启重新确认
+                                        on && a.fakeCyclePaused -> Pending(
+                                            title = "恢复伪装循环次数",
+                                            summary = "本次开机没能确认循环次数在结构体里的位置，为安全起见没有写入。重启手机后会重新确认。",
+                                            action = "重启",
+                                            run = { Vcut.applyWithReboot(mapOf("FAKE_CYCLE" to "1")) },
+                                        )
+                                        on -> null.also { run("正在应用…") { Vcut.enableFakeCycle() } }
+                                        else -> Pending(
+                                            title = "关闭伪装循环次数",
+                                            summary = "要重新加载模块才能把循环次数写回真实值，约需 30~90 秒，期间关机电压暂时恢复原厂。",
+                                            action = "重新加载",
+                                            run = { Vcut.applyWithReload(mapOf("FAKE_CYCLE" to "-1")) },
+                                        )
+                                    }
+                                },
+                            )
+                            SwitchPreference(
+                                title = "抬高满充电压",
+                                checked = a.fakeFg,
+                                enabled = enabled,
+                                onCheckedChange = { on ->
+                                    if (on) {
+                                        run("正在应用，会短暂断开充电约 11 秒…") { Vcut.enableFakeFg() }
+                                    } else {
+                                        pending = Pending(
+                                            title = "关闭抬高满充电压",
+                                            summary = "电量计里的伪装循环数只有重启才能清除，需要立即重启手机。",
+                                            action = "重启",
+                                            run = { Vcut.applyWithReboot(mapOf("FAKE_FG_CYCLE" to "-1")) },
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
 
                 // 写法取自 HyperMusicCover 捐赠页底部的说明文字

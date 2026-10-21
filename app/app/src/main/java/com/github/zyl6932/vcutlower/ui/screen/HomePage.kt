@@ -202,17 +202,7 @@ fun HomePage(
                     BasicComponent(title = "解锁容量", summary = unlockText(status))
                     BasicComponent(title = "显示电量", summary = status.displaySoc?.let { "$it%" } ?: "--")
                     BasicComponent(title = "均值电压", summary = status.meanMv?.let { "$it mV" } ?: "--")
-                    val ma = status.currentMa
-                    BasicComponent(
-                        title = "电流",
-                        summary = ma?.let { if (it >= 0) "放电 $it mA" else "充电 ${-it} mA" } ?: "--",
-                    )
                     BasicComponent(title = "电池温度", summary = status.tempC?.let { "%.1f ℃".format(it) } ?: "--")
-                    // 充电增强的实时状态（原在充电增强页，并到这里）；两路温度只有守护进程在跑时才读得到
-                    if (status.turboAlive) {
-                        BasicComponent(title = "充电电路温度", summary = milli(status.turbo["ctherm"]))
-                        BasicComponent(title = "接口温度", summary = milli(status.turbo["conn"]))
-                    }
                     BasicComponent(title = "充电增强", summary = turboStateText(Vcut.turboOf(status)))
                 }
             }
@@ -245,8 +235,7 @@ private fun unlockText(s: Vcut.Status): String {
         orig == null -> "等待模块首次校验…"
         else -> {
             val e = Unlock.estimate(orig, a.delay, a.fakeFg, s.fi("charger_full")?.div(1000))
-            val fg = if (e.fgMah > 0) "，含满充 +${e.fgMah}" else ""
-            "约 +${e.totalMah} mAh（估算，原厂 ${e.origMv} → ${e.newMv} mV$fg）"
+            "估算约增加 ${e.totalMah} mAh"
         }
     }
 }

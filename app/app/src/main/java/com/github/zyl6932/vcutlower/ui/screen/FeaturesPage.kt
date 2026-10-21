@@ -42,7 +42,7 @@ fun FeaturesPage(
                 Card(modifier = Modifier.nextCard()) {
                     ArrowPreference(
                         title = "充电增强",
-                        summary = "摘除有线热限流、提升充电电流，带温度与电量护栏",
+                        summary = "亮屏快充、提升充电电流，带温度与电量护栏",
                         onClick = { context.startActivity(Intent(context, ChargeActivity::class.java)) },
                     )
                 }

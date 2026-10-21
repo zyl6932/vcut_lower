@@ -1,6 +1,6 @@
 #!/system/bin/sh
 
-ui_print "- VCut Lower v1.8"
+ui_print "- VCut Lower v1.9"
 ui_print "-   降低软件关机电压 / 电量全程均匀下降"
 
 # ---------- 机型/内核校验 ----------
@@ -97,6 +97,32 @@ if [ ! -f "$DATA/.turbo_init" ]; then
   touch "$DATA/.turbo_init"
 fi
 rm -f /dev/vcut_def.sh
+
+# 充电阶梯（v1.9）：第一次装带阶梯的版本时，从本机设备树读原厂 FFC 表（25~35℃）作默认值。
+#   表是三元组「拐点电压 拐点前电流 拐点后电流」；截止(≤4495)以上的拐点不算。读不到就不配阶梯（全程 FORCE_MA）。
+if [ ! -f "$DATA/.ladder_init" ]; then
+  QC=/proc/device-tree/soc/mca_strategy_quick_charge/ffc_para_25_35
+  lv=; lm=
+  if [ -f "$QC" ]; then
+    set -- $(tr '\0' ' ' < "$QC")
+    [ $# -ge 3 ] && lm=$2
+    while [ $# -ge 3 ]; do
+      [ "$1" -lt 4495 ] 2>/dev/null && { lv="$lv${lv:+,}$1"; lm="$lm,$3"; }
+      shift 3
+    done
+  fi
+  if [ -n "$lv" ]; then
+    set_cfg LADDER_V "$lv"; set_cfg LADDER_MA "$lm"
+    ui_print "- 充电阶梯：已按本机原厂 FFC 表设置（拐点 $lv mV，电流 $lm mA）"
+  else
+    set_cfg LADDER_V ""; set_cfg LADDER_MA ""
+    ui_print "- 充电阶梯：本机设备树里没有原厂 FFC 表，按单档 FORCE_MA 运行"
+  fi
+  touch "$DATA/.ladder_init"
+fi
+# 带载电压上限超过 4495 的老配置钳回来（守护进程也会钳）
+v=$(sed -n 's/^MAX_VBAT=\([0-9]*\).*/\1/p' "$CFG" | head -1)
+[ -n "$v" ] && [ "$v" -gt 4495 ] && set_cfg MAX_VBAT 4495
 
 # 旧 turbo_charge 模块：迁移配置、停掉守护进程、禁用，避免两个守护进程抢同一组节点
 OLD_TC=/data/adb/modules/turbo_charge

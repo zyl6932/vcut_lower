@@ -47,6 +47,14 @@
             android:name=".app.ChargeActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".app.LadderActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".app.ChargeLogActivity"
+            android:exported="false" />
+
         <!-- 诊断包由 root 复制进 cache/share/ 后经此分享给其他应用 -->
         <provider
             android:name="androidx.core.content.FileProvider"

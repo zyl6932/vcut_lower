@@ -4,6 +4,8 @@
 #
 # 产物：/sdcard/Download/vcut_diag_<机型>_<时间>.tar.gz，把它发回即可。包含：
 #   diag.txt   机型/内核/符号/sysfs 真值/结构体宽范围 dump/模块状态/日志
+#   charge.txt 充电增强：控制节点、投票项、设备树充电表、温度节点、守护进程日志
+#   turbo_session.log / charge_hist.log  本次充电记录 / 历史充电采样（有才带）
 #   *.ko       目标函数所在的厂商模块（回电脑反汇编找锚点、核对符号 CRC）
 #   config.gz  内核配置（如需为该内核重编模块）
 #
@@ -51,7 +53,8 @@ echo "采集中（约 1~2 分钟，需等目标函数被调用）..."
   sec "设备"
   for p in ro.product.device ro.product.model ro.product.marketname ro.product.manufacturer \
            ro.build.version.incremental ro.build.version.release ro.build.display.id \
-           ro.soc.model ro.board.platform ro.boot.hardware; do
+           ro.soc.model ro.board.platform ro.boot.hardware \
+           ro.boot.verifiedbootstate ro.boot.vbmeta.device_state ro.boot.slot_suffix ro.boot.vbmeta.digest; do
     echo "$p=$(getprop $p)"
   done
   echo "uname=$(uname -a)"
@@ -82,6 +85,78 @@ echo "采集中（约 1~2 分钟，需等目标函数被调用）..."
   sec "config.sh"
   grep -v '^#' "$DATA/config.sh" 2>/dev/null | grep -v '^$'
 } > "$D" 2>&1
+
+# ---------- 充电增强（v1.9）：控制节点 / 投票 / 设备树充电表 / 温度节点 / 守护进程记录 ----------
+# 单独写 charge.txt。别的机型能不能开亮屏快充、提升电流，原厂阶梯是什么，都靠这一份判断（tools/analyze_diag.py 解析）。
+C="$OUT/charge.txt"
+VT=/sys/kernel/debug/business-votable
+DT=/proc/device-tree/soc
+# 设备树属性：字符串表（以 \0 结尾、去掉 \0 后全是可打印字符）写 s:，其余写 x:十六进制（大端 u32）
+# 可打印字符用 \040-\176 范围：busybox 的 tr 不认 [:print:]（2026-10-21 真机上全被判成 x:）；
+# 系统 toybox 的 tr 连范围也不对，所以 analyze_diag.py 对 x: 还会按字符串兜底
+dtprop() {
+  if [ "$(tail -c 1 "$1" | od -An -tx1 | tr -d ' ')" = "00" ] && \
+     [ "$(tr -d '\0' < "$1" | tr -d '\040-\176' | wc -c)" -eq 0 ] && [ -n "$(tr -d '\0' < "$1")" ]; then
+    echo "${1##*/}=s:$(head -c 4096 "$1" | tr '\0' ' ')"
+  else
+    echo "${1##*/}=x:$(head -c 1024 "$1" | od -An -v -tx1 | tr -s ' \n' ' ')"
+  fi
+}
+dtnode() {
+  [ -d "$1" ] || { echo "(不存在 $1)"; return; }
+  for f in "$1"/*; do
+    [ -f "$f" ] || continue
+    case "${f##*/}" in name|phandle) continue ;; esac
+    dtprop "$f"
+  done
+}
+{
+  mount -t debugfs none /sys/kernel/debug 2>/dev/null
+  sec "控制节点"
+  for f in /sys/class/xm_power/charger/charger_thermal/wired_thermal_remove $VT/curr_max/force_val $VT/curr_max/force_active; do
+    if [ -e "$f" ]; then echo "$f=$(cat "$f" 2>/dev/null)"; else echo "$f=(不存在)"; fi
+  done
+
+  sec "投票项（business-votable）"
+  if [ -d "$VT" ]; then
+    for d in "$VT"/*/; do
+      n=${d%/}; n=${n##*/}
+      echo "--- $n"
+      head -c 4096 "$d/status" 2>/dev/null
+      echo
+    done
+  else
+    echo "(不存在 $VT)"
+  fi
+
+  sec "设备树：充电相关节点"
+  ls -d "$DT"/*charg* "$DT"/*jeita* "$DT"/*batt* 2>/dev/null | sed "s#^$DT/##"
+  for n in mca_strategy_quick_charge mca_strategy_buckchg_class mca_quick_charge_batt_para_gbl smart_charge \
+           mca_buckchg_jeita mca_buckchg_jeita_gbl_para mca_buckchg_jeita_second_para mca_buckchg_jeita_tmp_para; do
+    sec "dt/$n"; dtnode "$DT/$n"
+  done
+
+  sec "温度节点（thermal_zone 编号 类型 温度）"
+  for z in /sys/class/thermal/thermal_zone*; do
+    read -r ty < "$z/type" 2>/dev/null || continue
+    read -r tp < "$z/temp" 2>/dev/null || tp=?
+    echo "${z##*/} $ty $tp"
+  done
+
+  sec "供电"
+  ls /sys/class/power_supply/
+  sec "usb"; dumpdir /sys/class/power_supply/usb
+  sec "xm_power/charger"; ls /sys/class/xm_power/charger/ 2>/dev/null
+
+  sec "充电增强守护进程"
+  echo "alive=$(pgrep -f vcut_turbo.sh | head -1)"
+  cat /dev/vcut_turbo.state 2>/dev/null
+  sec "turbo.log（最后 200 行）"
+  tail -200 "$DATA/turbo.log" 2>/dev/null
+} > "$C" 2>&1
+# 本次充电记录与历史充电采样（阶梯图按电量画横轴用），原样带上
+cp /dev/vcut_turbo.log "$OUT/turbo_session.log" 2>/dev/null
+cp "$DATA/charge_hist.log" "$OUT/charge_hist.log" 2>/dev/null
 
 # ---------- 结构体宽范围只读 dump ----------
 {

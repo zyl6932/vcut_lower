@@ -10,6 +10,8 @@
      （模块内核侧扫描用的是同一套语义；这里命中 = 手机上自解析大概率成功）
   3. 结构体字段对账：用锚点 + delta 推导出的偏移读 dump，对 sysfs 真值
   4. 模块实际运行结果（观测模式 insmod 后的 t_resolved / armed / validate 日志）
+  5. 充电增强（charge.txt，v1.9 起）：控制节点、curr_max 投票、设备树原厂阶梯、温度节点、守护进程记录
+     ——结论单独列，不影响 1~4 的「能否开正常模式」
 """
 import io
 import os
@@ -84,6 +86,139 @@ def parse_diag(txt):
     return kv, dump, autooff, vcut
 
 
+def parse_sections(txt):
+    """charge.txt：按 ===== 节名 ===== 切成 {节名: [行]}"""
+    secs, cur = {}, ''
+    for line in txt.splitlines():
+        m = re.match(r'===== (.*) =====', line)
+        if m:
+            cur = m.group(1)
+            secs.setdefault(cur, [])
+        else:
+            secs.setdefault(cur, []).append(line)
+    return secs
+
+
+def dt_props(lines):
+    """collect.sh dtprop 的输出：名=s:字符串表 / 名=x:十六进制（大端 u32）→ {名: [str] 或 [int]}"""
+    out = {}
+    for line in lines:
+        m = re.match(r'(\S+?)=(s|x):(.*)$', line)
+        if not m:
+            continue
+        name, kind, val = m.groups()
+        if kind == 's':
+            out[name] = val.split()
+        else:
+            b = bytes(int(h, 16) for h in val.split() if re.fullmatch(r'[0-9a-fA-F]{2}', h))
+            # 兜底：手机上的 tr 分不出字符串时也会写成 x:（以 \0 结尾、其余全是可打印字符 = 字符串表）
+            if b.endswith(b'\0') and b.strip(b'\0') and all(32 <= c < 127 for c in b if c):
+                out[name] = b.decode('ascii').replace('\0', ' ').split()
+            else:
+                out[name] = [struct.unpack_from('>i', b, i)[0] for i in range(0, len(b) - len(b) % 4, 4)]
+    return out
+
+
+def ladder_of(tab, ceil=4495):
+    """原厂表（三元组：拐点 拐点前电流 拐点后电流）→ customize.sh 会设的默认阶梯（与它同一套规则）"""
+    rows = [tab[i:i + 3] for i in range(0, len(tab) - 2, 3)]
+    if not rows:
+        return [], []
+    nodes = [r[0] for r in rows if r[0] < ceil]
+    ma = [rows[0][1]] + [r[2] for r in rows if r[0] < ceil]
+    return nodes, ma
+
+
+def charge_report(root):
+    """[5] 充电增强。返回结论列表（只描述充电增强，不影响降关机电压的判定）"""
+    print('\n[5] 充电增强（charge.txt）')
+    path = os.path.join(root, 'charge.txt')
+    if not os.path.exists(path):
+        print('   （诊断包里没有 charge.txt：v1.9 之前的 collect.sh）')
+        return []
+    secs = parse_sections(open(path, encoding='utf-8', errors='replace').read())
+    notes = []
+
+    nodes = {}
+    for line in secs.get('控制节点', []):
+        k, _, v = line.partition('=')
+        parts = k.split('/')
+        nodes['/'.join(parts[-2:]) if 'curr_max' in parts else parts[-1]] = v
+    tr_ok = nodes.get('wired_thermal_remove', '(不存在)') != '(不存在)'
+    fc_ok = nodes.get('curr_max/force_val', '(不存在)') != '(不存在)'
+    print('   亮屏快充节点 wired_thermal_remove : ' + ('有，当前 ' + nodes['wired_thermal_remove'] if tr_ok else '✗ 没有'))
+    print('   提升电流节点 curr_max/force_val    : '
+          + ('有，当前 %s（force_active=%s）' % (nodes['curr_max/force_val'], nodes.get('curr_max/force_active'))
+             if fc_ok else '✗ 没有'))
+
+    # curr_max 投票：谁在投、生效值（这台机器的电流瓶颈在哪一方）
+    blk, on = [], False
+    for line in secs.get('投票项（business-votable）', []):
+        if line.startswith('--- '):
+            on = line[4:].strip() == 'curr_max'
+            continue
+        if on and line.strip():
+            blk.append(line.strip())
+    if blk:
+        print('   curr_max 投票：')
+        for line in blk[:14]:
+            print('     ' + line[:150])
+    else:
+        print('   curr_max 投票：（没有 business-votable/curr_max）')
+
+    qc = dt_props(secs.get('dt/mca_strategy_quick_charge', []))
+    bk = dt_props(secs.get('dt/mca_strategy_buckchg_class', []))
+    if qc:
+        tabs = sorted(k for k in qc if re.match(r'(ffc|normal)_para_\d+_\d+$', k))
+        print('   原厂阶梯表：' + (' '.join(tabs) or '（无）'))
+        for k in ('real_curr_max', 'max_vbat'):
+            if qc.get(k):
+                print(f'   {k} = {qc[k][0]}')
+        if bk.get('ffc_temp_low') and bk.get('ffc_temp_high'):
+            print(f"   FFC 温度区间 {bk['ffc_temp_low'][0]}~{bk['ffc_temp_high'][0]} ℃")
+        base = qc.get('ffc_para_25_35')
+        if base:
+            tab = [int(x) for x in base if re.match(r'-?\d+$', x)]
+            print('   ffc_para_25_35 = ' + ' | '.join(' '.join(map(str, tab[i:i + 3]))
+                                                    for i in range(0, len(tab) - 2, 3)))
+            n, m = ladder_of(tab)
+            print(f"   → 安装时默认阶梯：拐点 {','.join(map(str, n))} mV，电流 {','.join(map(str, m))} mA")
+        else:
+            notes.append('设备树没有 ffc_para_25_35 → 充电阶梯按单档 FORCE_MA 运行（customize 不会自动设阶梯）')
+    else:
+        notes.append('设备树没有 mca_strategy_quick_charge → 原厂阶梯未知，阶梯页没有灰色参考线')
+
+    zones = {}
+    for line in secs.get('温度节点（thermal_zone 编号 类型 温度）', []):
+        f = line.split()
+        if len(f) >= 3:
+            zones[f[1]] = (f[0], f[2])
+    for z in ('charger_therm', 'conn_therm'):
+        print(f'   温度节点 {z:14s}: ' + (f'{zones[z][0]} = {zones[z][1]}' if z in zones else '✗ 没有'))
+    tz_ok = 'charger_therm' in zones and 'conn_therm' in zones
+
+    st = [line for line in secs.get('充电增强守护进程', []) if line.strip()]
+    if st:
+        print('   守护进程：' + ' | '.join(st)[:220])
+    for fn, what in (('turbo_session.log', '本次充电采样'), ('charge_hist.log', '历史充电采样')):
+        fp = os.path.join(root, fn)
+        if os.path.exists(fp):
+            n = sum(1 for line in open(fp, encoding='utf-8', errors='replace')
+                    if line.strip() and not line.startswith('E '))
+            print(f'   {what}（{fn}）：{n} 点')
+
+    if not tr_ok and not fc_ok:
+        notes.append('两个控制节点都没有 → 充电增强在本机不可用（守护进程会判为「不支持」）')
+    else:
+        if not tz_ok:
+            notes.append('缺 charger_therm/conn_therm 温度节点 → 温度护栏无法就绪，亮屏快充和提升电流都不会生效（fail-safe）')
+        if not tr_ok:
+            notes.append('没有 wired_thermal_remove → 亮屏快充不可用')
+        if not fc_ok:
+            notes.append('没有 curr_max/force_val → 提升充电电流不可用')
+    return notes
+
+
 def ko_versions(path):
     elf = ELFFile(open(path, 'rb'))
     crcs, vermagic = {}, None
@@ -122,7 +257,12 @@ def main():
     print(f"   内核: {kv.get('uname', '').split(' ')[2] if kv.get('uname') else '?'}")
 
     # ---------- 1. CRC / vermagic ----------
-    kos = [f for f in os.listdir(root) if f.endswith('.ko')]
+    kos = sorted(f for f in os.listdir(root) if f.endswith('.ko'))
+    # 包里还有电量计驱动 bq27z561.ko（v1.6 起采集），按字母排它在前；要反汇编的是目标函数所在模块
+    m = re.search(r'目标函数所在模块: (\S+)', txt)
+    if m and m.group(1) + '.ko' in kos:
+        kos.remove(m.group(1) + '.ko')
+        kos.insert(0, m.group(1) + '.ko')
     print('\n[1] 符号 CRC / vermagic')
     if not kos:
         print('   ✗ 诊断包里没有厂商 .ko')
@@ -247,12 +387,20 @@ def main():
         if '校验通过' in line or '校验失败' in line or '自解析' in line:
             print('   ' + line.strip()[:200])
 
+    charge_notes = charge_report(root)
+
     print('\n========== 结论 ==========')
     if verdict:
         for v in verdict:
             print('  ✗ ' + v)
     else:
         print('  ✓ 各项通过：可以让对方在 /data/adb/vcut_lower/config.sh 加 MODE=full 并设定关机电压')
+    if charge_notes:
+        print('  充电增强：')
+        for v in charge_notes:
+            print('   ✗ ' + v)
+    else:
+        print('  ✓ 充电增强：控制节点与温度节点齐全，可以开（未验证机型，建议先单开亮屏快充观察）')
 
 
 if __name__ == '__main__':

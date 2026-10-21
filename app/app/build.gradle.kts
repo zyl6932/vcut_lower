@@ -24,8 +24,8 @@ android {
         applicationId = "com.github.zyl6932.vcutlower"
         minSdk = 35
         targetSdk = 37
-        versionCode = 18000
-        versionName = "1.8"
+        versionCode = 19000
+        versionName = "1.9"
     }
 
     signingConfigs {
