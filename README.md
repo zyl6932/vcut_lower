@@ -2,9 +2,11 @@
 
 小米 17 Pro Max（popsicle）的 kprobe 内核模块：把软件关机电压降到可调值，
 并在内核侧接管电量显示，使百分比全程按同一 mAh 刻度均匀下降。
+v1.8 起并入**充电增强**（亮屏快充 + 按充电阶梯提升电流，守护进程 `vcut_turbo.sh`），
+并带**配套 App**（`app/`，刷模块时自动安装）。
 
-**⚠️ 当前适配 popsicle + `6.12.69-android16-6-*`（HyperOS OS4.0.0.32）。**
-struct 偏移是针对该 build 逆向得到的，其他机型/内核几乎必然不同。
+**⚠️ 当前适配 popsicle + `6.12.69-android16-6-*`（HyperOS OS4.0.4.0，靠运行时自解析；
+编译期基线是 OS4.0.0.32）。** 其他机型见 v1.6 观测模式。
 
 ### ★系统更新后通常【不需要】回电脑重编（2026-08-29 起）
 
@@ -20,6 +22,48 @@ cat /sys/module/vcut_lower/parameters/t_anchors    # 0x1f = 5 个锚点全命中
 
 只有在**符号 CRC 变了**（GKI 内核换了）或**解析失败且指纹不符**时才需要回电脑重编，
 详见下面「系统更新后怎么办」。
+
+### v1.9（2026-10-21）：充电阶梯、充电记录、诊断包加充电增强
+
+**充电阶梯**（「提升充电电流」原来是全程强制 18 A）
+- 守护进程按**带载电池电压**分档强制 `business-votable/curr_max` 的 `force_val`：
+  `LADDER_V`（拐点 mV，逗号分隔）+ `LADDER_MA`（各档 mA，比拐点多一个），截止 = `MAX_VBAT`。
+  同一次充电**只降档不回升**（连续 2 次采样越过拐点才换档），拔插重新判定。
+- 默认值：`customize.sh` 首次装 v1.9 时读设备树
+  `/proc/device-tree/soc/mca_strategy_quick_charge/ffc_para_25_35`（三元组「拐点 拐点前电流 拐点后电流」），
+  截止以下的拐点和电流写进 `config.sh`。17 Pro Max 为 `4015,4105` / `18000,12400,10845`。读不到则单档 `FORCE_MA`。
+- **固定护栏（不读配置）**：电芯 < 23 ℃ 不强制、交还原厂（回差 1 ℃，只管提升电流；原厂此时只给 4.3~10.8 A，防析锂）；
+  带载电压上限钳 ≤ 4495；单档 ≤ 18000 mA。
+- App 改阶梯 / 护栏后写 `/dev/vcut_turbo.reload`，守护进程下一轮（≤5 s）重读配置；切开关则重启守护进程。
+  `sleep` 改成后台 + `wait`，收到信号立刻退出（原来要睡完 30 s，还会把 `run=off` 写进新进程的状态）。
+- ★实测（旧 TurboCharge 的 887 个采样）：强制 18 A 时电压照样停在原厂 4015 / 4105 拐点、电流按原厂降——
+  原厂快充策略的阶梯不走 `curr_max` 投票。所以强制能做的是**拿掉 jeita 等投票方的上限**（本机原卡在 8.7 A）
+  和**把某档压低**，压不过原厂快充自己的阶梯。App 里拐点因此固定，不可拖。（待 v1.9 充电记录的电流视图再确认）
+
+**充电记录**（重启不丢）
+- 每次充电（插上到拔掉）一个文件：`/data/adb/vcut_lower/sessions/<开始 epoch>.log`。
+  `D 时间 电压mV 电流µA 电量 电芯温度(0.1℃) 充电电路温度(m℃) 接口温度(m℃) 档位 强制mA`，`E 时间 事件`。
+- 充电中先写内存盘 `/dev/vcut_turbo.log`，每 12 轮（约 1 分钟）只把新行追加到 `/data`，拔出再同步；
+  不到 1 分钟的丢弃，只留最近 30 次。会话变量在 `/dev/vcut_turbo.sess`，App 切开关重启守护进程时接着记同一次
+  （最后一行超过 2 分钟则另起一次）。两个开关都关时守护进程不运行，不记录。
+
+**诊断包**：`collect.sh` 另出 `charge.txt`（控制节点、全部投票项 status、设备树充电表——字符串 `s:` / 大端 u32 `x:`、
+全部 thermal_zone、usb、守护进程状态与 turbo.log 尾 200 行）+ 本次 / 历史记录；`analyze_diag.py` 新增 [5] 充电增强，
+结论单列（节点齐不齐、默认阶梯是什么、能否开）。★busybox 的 `tr` 不认 `[:print:]`、`od` 不加 `-v` 会把重复行折成 `*`。
+
+**App 1.9**：充电增强页分「功能 / 提升充电电流 / 通用」三组（FoldUnder 收起）；充电阶梯页（横轴按本机充电记录
+换算成电量比例，上下拖电流、拖截止线，右上角恢复默认）；充电记录（列表 → 详情，功率 / 电流视图）。
+状态读取改为一次 `grep -H` 读完 sysfs（1.2 s → 66 ms），页面间共享状态缓存。
+
+### v1.7 / v1.8（2026-10-21）：配套 App、并入充电增强
+
+- **App**（`app/`，Compose + Miuix 0.9.4-rc01，包名 `com.github.zyl6932.vcutlower`）：主页 / 功能（电池解容、充电增强）/
+  设置 / 关于。界面照搬 HyperMusicCover。原则：开关 = 实际运行状态，能即时生效就当场生效，不能的弹「取消 / 重新加载（或重启）」。
+- **充电增强**：用户自己的 TurboCharge 并入为 `ksumodule/vcut_turbo.sh`。A「亮屏快充」= 写
+  `xm_power/charger/charger_thermal/wired_thermal_remove` 摘有线热限流；B「提升充电电流」= 强制 `curr_max`。
+  护栏：电量 / 带载电压 / 电芯·充电电路·接口温度，带回差。状态写 `/dev/vcut_turbo.state`。
+  装 v1.8 时迁移旧 turbo_charge 模块的配置并禁用它。除 popsicle 外默认关。
+- ⚠ 刷包后**未重启**期间，App 切开关会用 `/data/adb/modules/vcut_lower/` 里的旧脚本重启守护进程（新脚本在 `modules_update`）。
 
 ### v1.6（2026-10-21）：其他机型观测模式
 
@@ -135,13 +179,22 @@ mean 没动 → delta=0 → 把 fw/sw/empty 留在了旧偏移，而锚点把 de
 |---|---|
 | `vcut_lower.c` | 内核模块源码（唯一的核心文件）|
 | `Makefile` | 外部模块 Makefile |
-| `ksumodule/` | KernelSU 模块打包目录（service.sh / customize.sh / action.sh / config）|
-| `tools/` | 构建、验收、实测、分析用的脚本 |
+| `ksumodule/` | KernelSU 模块打包目录（service.sh / customize.sh / action.sh / config；`vcut_turbo.sh` 充电增强守护进程；`collect.sh` 诊断包；`autooff.sh` 只读字段对账）|
+| `app/` | 配套 App（Compose + Miuix）|
+| `tools/` | 构建、验收、实测、分析用的脚本（`pack_module.py` 打包、`analyze_diag.py` 分析诊断包）|
 | `docs/` | 设计文档与完整工作日志 |
 
 ## 构建
 
-需要与设备匹配的 GKI 内核树。要点（详见 `docs/工作日志.md` §37-§57）：
+**App 与打包**（只改了脚本或 App 时不用重编 .ko）：
+
+```bash
+cd app && ./gradlew --offline assembleRelease     # 签名复用 HMC 的 release.jks（app/keystore.properties，已 gitignore）
+python tools/pack_module.py                        # → build/vcut_lower-<version>.zip（含 vcutlower.apk）
+# 装机：adb push 后 su -c /data/adb/ksud module install <zip>，重启生效
+```
+
+**内核模块**需要与设备匹配的 GKI 内核树。要点（详见 `docs/工作日志.md` §37-§57）：
 
 ```bash
 # 1. 源码分支：与本机 6.12.23-android16-5 精确对应
@@ -254,6 +307,22 @@ restore_on_exit=1           rmmod 时写回原值（★必须，vcutoff 是粘�
 只读遥测：`armed sig_ok t_hits t_raw_soc t_disp t_mean_volt t_current t_cycle
 t_failsafe t_handoff_cnt t_vbatt_empty`
 
+## 充电增强配置（`/data/adb/vcut_lower/config.sh`）
+
+```
+ENABLE_THERMAL_REMOVE=1     亮屏快充（摘有线热限流）
+ENABLE_FORCE=1              提升充电电流（按阶梯强制 curr_max）
+LADDER_V=4015,4105          拐点（mV），安装时取设备树原厂 FFC 表
+LADDER_MA=18000,12400,10845 各档电流（mA，≤18000）
+MAX_VBAT=4460               截止 = 带载电压上限（≤4495）
+MAX_SOC=80                  电量上限，只管提升电流
+MAX_BTEMP=420               电芯温度上限（0.1℃），两项都管
+MAX_CTHERM=70000 MAX_CONN=45000   充电电路 / 接口温度上限（m℃）
+HYST_*                      各护栏回差
+```
+
+日志 `/data/adb/vcut_lower/turbo.log`；实时状态 `/dev/vcut_turbo.state`；充电记录 `/data/adb/vcut_lower/sessions/`。
+
 ## 已知问题 / 后续
 
 - **`f(V)` 仍是线性近似**。实测低压段线性高估余量达 37 个百分点（Vocv 2863 时
@@ -262,8 +331,14 @@ t_failsafe t_handoff_cnt t_vbatt_empty`
   重负载（实测峰值 5A，压降 ~140mV）下会在开路电压还有 ~2820mV 时到闸。
   想榨到真正的开路 2.7V 需息屏轻载放电。
 - **分档实测未做完**。设计建议 2900→2800→2700 每档一次完整放电，目前直接跑了 2700。
+- **充电阶梯的实际效果待实测**：要一次电量 < 90% 的充电，用充电记录的电流视图对比「强制上限」和「实际电流」，
+  确认原厂快充在拐点自己降档的结论。
+- 充电增强的节点与护栏只在 17 Pro Max 上验证过；其他机型靠诊断包 [5] 判断。
 
 ## 安全红线
 
 只放宽**软件**截止，电量计固件与 PMIC 硬件过放保护完全不碰。
 反复深放到 2.6~2.7V 会加速老化、有析锂风险。低温不深放。
+
+充电增强只改投票上限与热限流开关，不碰充电芯片寄存器、不改设备树（2026-10-21 核实本机当前 dtbo 与原厂镜像逐字节一致、vbmeta 签名吻合）。
+低于 23 ℃ 不提升电流、带载电压 ≤ 4495、单档 ≤ 18 A 写死在守护进程里，配置改不动。
