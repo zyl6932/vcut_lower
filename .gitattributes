@@ -2,3 +2,6 @@
 ksumodule/** text eol=lf
 ksumodule/*.ko binary
 *.ko binary
+app/gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
