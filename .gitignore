@@ -45,3 +45,6 @@ app/app/build/
 app/local.properties
 app/keystore.properties
 app/.kotlin/
+
+# ---- 交接提示词（给 AI 新会话用的本地笔记，含本机路径，不入库）----
+交接提示词-*.md
